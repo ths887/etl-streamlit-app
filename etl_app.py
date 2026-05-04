@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import streamlit as st
 import pandas as pd
@@ -6,21 +7,29 @@ import psycopg2
 import psycopg2.extras
 from datetime import datetime
 from supabase import create_client, Client
+
+# --- CHANGE START --- PATCH 1: Load credentials from .env via environment variables
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv()  # reads .env file from project root at startup
+# --- CHANGE END ---
 
 # ═══════════════════════════════════════════════════════════
 # 1. CONFIG
 # ═══════════════════════════════════════════════════════════
-import os
 
+# --- CHANGE START --- PATCH 1: DB credentials from environment variables (no hardcoding)
 DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "database": "Product_Data",
-    "user": "postgres",
+    "host":     os.getenv("DB_HOST"),
+    "port":     int(os.getenv("DB_PORT", "5432")),
+    "database": os.getenv("DB_NAME"),
+    "user":     os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
 }
+
+if not all([DB_CONFIG["host"], DB_CONFIG["database"], DB_CONFIG["user"]]):
+    raise ValueError("Database environment variables are not set properly")
+
+# --- CHANGE END ---
 
 # ══════════════════════════════════════════════════════════
 # ADMIN CONFIGURATION
@@ -75,12 +84,19 @@ def is_admin() -> bool:
     return st.session_state.get("user_role") == "admin"
 
 
-# ── Supabase credentials ───────────────────────────────────
-SUPABASE_URL      = "https://qwqhpifceigogcganvcp.supabase.co"
-SUPABASE_ANON_KEY = "sb_publishable_erx9xCVAP1Gm7hI2jb6Pig_RoQpy-0-"
+# --- CHANGE START --- PATCH 1: Supabase credentials from environment variables
+SUPABASE_URL      = os.getenv("SUPABASE_URL", "")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+# --- CHANGE END ---
 
 @st.cache_resource
 def get_supabase() -> Client:
+    # --- CHANGE START --- PATCH 1: validate env vars before creating client
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+         raise ValueError(
+            "SUPABASE_URL and SUPABASE_ANON_KEY must be set in environment variables"
+        )
+    # --- CHANGE END ---
     return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 TARGET_FIELDS = [
@@ -572,7 +588,6 @@ def soft_delete_log(log_id: int):
     """Soft-delete log row AND all linked etl_data rows atomically.
     ADMIN ONLY — raises PermissionError if caller is not admin.
     """
-    # ── DB-level admin guard (catches any bypass attempt) ──
     if st.session_state.get("user_role") != "admin":
         raise PermissionError("Only admin users can delete records.")
     conn = get_conn()
@@ -905,6 +920,92 @@ def fetch_etl_data_for_log_with_taxonomy(log_id: int, taxonomy_filter: str = "")
 
 
 # ═══════════════════════════════════════════════════════════
+# 12. AUTH — Login / Signup page
+# (MOVED HERE — must be defined before init_state() call and login gate)
+# ═══════════════════════════════════════════════════════════
+
+# --- MOVE START ---
+# --- CHANGE START --- PATCH 2: is_logged_in helper for strict session gate
+def is_logged_in():
+    return st.session_state.get("user_id") is not None
+# --- CHANGE END ---
+
+
+def show_login_page():
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("""
+            <h1 style="text-align:center; color:#1e293b; margin-top:10px;">
+                🔀 ETL Visual Data Mapper
+            </h1>
+            <p style="text-align:center; color:#64748b; margin-bottom:10px;">
+                Sign in or create an account
+            </p>
+        """, unsafe_allow_html=True)
+
+        st.markdown("<p style='text-align:center; margin-bottom:5px;'>Choose Action</p>", unsafe_allow_html=True)
+        mode = st.radio("", ["Sign In", "Sign Up"], horizontal=True)
+        st.markdown(f"<h3 style='text-align:center;'>🔐 {mode}</h3>", unsafe_allow_html=True)
+
+        email    = st.text_input("Email",    placeholder="you@example.com")
+        password = st.text_input("Password", placeholder="••••••••", type="password")
+
+        if mode == "Sign In":
+            
+            if st.button("Sign In", type="primary", use_container_width=True):
+                if not email or not password:
+                    st.error("Please enter both email and password.")
+                    return
+                try:
+                    supabase = get_supabase()
+                    resp     = supabase.auth.sign_in_with_password({"email": email, "password": password})
+                    user     = resp.user
+
+                    if not user:
+                        st.error("Invalid login response. Please try again.")
+                        return
+                    # --- CHANGE START --- PATCH 2: Store all three auth keys on successful login
+                    st.session_state.user_id    = str(user.id)
+                    st.session_state.user_email = user.email
+                    st.session_state.user_role  = get_role_for_user(str(user.id), user.email)
+                    # --- CHANGE END ---
+                    st.success("Login successful!")
+                    st.rerun()
+                except Exception as e:
+                    err_msg = str(e)
+
+                    if "email not confirmed" in err_msg.lower():
+                        st.warning("You must confirm your email before signing in.")
+                    else:
+                        st.error(f"Login failed: {err_msg}")
+
+        # --- CHANGE START --- PATCH 3: Sign Up with email confirmation message + input validation
+        elif mode == "Sign Up":
+            if st.button("Create Account", type="primary", use_container_width=True):
+                if not email or not password:
+                    st.error("Please enter both email and password.")
+                    return
+                if len(password) < 6:
+                    st.error("Password must be at least 6 characters.")
+                    return
+                try:
+                    supabase = get_supabase()
+                    supabase.auth.sign_up({"email": email, "password": password})
+                    st.success(
+                        "✅ Account created! **Check your email to confirm your account** "
+                        "before signing in. (Check your spam folder if you don't see it within a minute.)"
+                    )
+                except Exception as e:
+                    err_msg = str(e)
+                    if "already registered" in err_msg.lower() or "already exists" in err_msg.lower():
+                        st.error("An account with this email already exists. Please sign in instead.")
+                    else:
+                        st.error(f"Signup failed: {err_msg}")
+        # --- CHANGE END ---
+# --- MOVE END ---
+
+
+# ═══════════════════════════════════════════════════════════
 # 4. SESSION STATE INIT
 # ═══════════════════════════════════════════════════════════
 
@@ -949,6 +1050,16 @@ def init_state():
             st.session_state[k] = v
 
 init_state()
+
+# --- LOGIN GATE ADD START ---
+# Place this block immediately after init_state()
+if not is_logged_in():
+    show_login_page()
+    st.stop()
+# --- LOGIN GATE ADD END ---
+
+
+
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1533,7 +1644,7 @@ def step_upload():
 
 
 # ═══════════════════════════════════════════════════════════
-# 7. STEP 2 — PRIMARY FIELD MAPPING (MODIFIED — project mapping suggestion label)
+# 7. STEP 2 — PRIMARY FIELD MAPPING (MODIFIED — sorted display + project mapping label)
 # ═══════════════════════════════════════════════════════════
 
 def step_mapping():
@@ -1569,10 +1680,25 @@ def step_mapping():
 
     source_cols = st.session_state.source_columns
     total       = len(source_cols)
-    n_pages     = max(1, (total + ROWS_PER_MAP_PAGE - 1) // ROWS_PER_MAP_PAGE)
-    page        = st.session_state.map_page
-    page_cols   = source_cols[page * ROWS_PER_MAP_PAGE : (page + 1) * ROWS_PER_MAP_PAGE]
     auto_mapped = st.session_state.get("auto_mapped", {})
+
+    # --- CHANGE START --- PATCH 4: Sort columns — project-mapped first, auto-mapped next, unmapped last
+    proj_matched_keys = set(st.session_state.get("proj_auto_mapped", {}).keys())
+    auto_mapped_keys  = set(auto_mapped.keys()) - proj_matched_keys
+    unmapped_keys     = [
+        c for c in source_cols
+        if c not in proj_matched_keys and c not in auto_mapped_keys
+    ]
+    sorted_cols = (
+        [c for c in source_cols if c in proj_matched_keys] +
+        [c for c in source_cols if c in auto_mapped_keys] +
+        unmapped_keys
+    )
+    # --- CHANGE END ---
+
+    n_pages   = max(1, (total + ROWS_PER_MAP_PAGE - 1) // ROWS_PER_MAP_PAGE)
+    page      = st.session_state.map_page
+    page_cols = sorted_cols[page * ROWS_PER_MAP_PAGE : (page + 1) * ROWS_PER_MAP_PAGE]
 
     # summary bar
     auto_count   = sum(1 for c in source_cols if auto_mapped.get(c) and st.session_state.mapping.get(c) == auto_mapped.get(c))
@@ -2188,7 +2314,7 @@ def step_result():
         auth_backup = {
             "user_id":    st.session_state.get("user_id"),
             "user_email": st.session_state.get("user_email"),
-            "user_role":  st.session_state.get("user_role", "user"),  # ← preserve role
+            "user_role":  st.session_state.get("user_role", "user"),
         }
         for k in list(st.session_state.keys()):
             del st.session_state[k]
@@ -2198,68 +2324,18 @@ def step_result():
         st.rerun()
 
 
-# ═══════════════════════════════════════════════════════════
-# 12. AUTH — Login / Signup page (unchanged)
-# ═══════════════════════════════════════════════════════════
-
-def show_login_page():
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.markdown("""
-            <h1 style="text-align:center; color:#1e293b; margin-top:10px;">
-                🔀 ETL Visual Data Mapper
-            </h1>
-            <p style="text-align:center; color:#64748b; margin-bottom:10px;">
-                Sign in or create an account
-            </p>
-        """, unsafe_allow_html=True)
-
-        st.markdown("<p style='text-align:center; margin-bottom:5px;'>Choose Action</p>", unsafe_allow_html=True)
-        mode = st.radio("", ["Sign In", "Sign Up"], horizontal=True)
-        st.markdown(f"<h3 style='text-align:center;'>🔐 {mode}</h3>", unsafe_allow_html=True)
-
-        email    = st.text_input("Email",    placeholder="you@example.com")
-        password = st.text_input("Password", placeholder="••••••••", type="password")
-
-        if mode == "Sign In":
-            if st.button("Sign In", type="primary", use_container_width=True):
-                if not email or not password:
-                    st.error("Please enter both email and password.")
-                    return
-                try:
-                    supabase = get_supabase()
-                    resp     = supabase.auth.sign_in_with_password({"email": email, "password": password})
-                    user     = resp.user
-                    st.session_state.user_id    = str(user.id)
-                    st.session_state.user_email = user.email
-                    # ── CHANGE 7: resolve and store role at login time ──
-                    st.session_state.user_role  = get_role_for_user(str(user.id), user.email)
-                    st.success("Login successful!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Login failed: {e}")
-
-        elif mode == "Sign Up":
-            if st.button("Create Account", type="primary", use_container_width=True):
-                if not email or not password:
-                    st.error("Please enter both email and password.")
-                    return
-                try:
-                    supabase = get_supabase()
-                    supabase.auth.sign_up({"email": email, "password": password})
-                    st.success("Account created! You can now sign in.")
-                except Exception as e:
-                    st.error(f"Signup failed: {e}")
-
 
 # ═══════════════════════════════════════════════════════════
-# 13. MAIN ROUTER (MODIFIED — adds new sections above Step 1)
+# 13. MAIN ROUTER
 # ═══════════════════════════════════════════════════════════
 
 def main():
-    if not st.session_state.get("user_id"):
+    # --- CHANGE START --- PATCH 2: Strict login gate using is_logged_in() + st.stop()
+    if not is_logged_in():
         show_login_page()
+        st.stop()
         return
+    # --- CHANGE END ---
 
     # Top bar
     top_l, top_r = st.columns([8, 2])
@@ -2278,10 +2354,12 @@ def main():
             f'{role_label} &nbsp;·&nbsp; {st.session_state.get("user_email", "")}</div>',
             unsafe_allow_html=True,
         )
+        # --- AUTH FIX START ---
         if st.button("🚪 Logout", use_container_width=True):
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
+        # --- AUTH FIX END ---
 
     try:
         create_tables()
