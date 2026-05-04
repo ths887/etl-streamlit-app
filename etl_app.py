@@ -51,33 +51,32 @@ ADMIN_EMAILS: set[str] = {
     # "another@yourcompany.com",
 }
 
-
 def get_role_for_user(user_id: str, user_email: str) -> str:
-    """
-    Determine role for the logged-in user.
-    Priority: ADMIN_EMAILS config → DB role column → default 'user'.
-    Called once at login; result stored in st.session_state.user_role.
-    """
-    # Option A: hardcoded admin list (fastest, no DB query)
+    # Option A: hardcoded admin list
     if user_email and user_email.lower() in {e.lower() for e in ADMIN_EMAILS}:
         return "admin"
-    # Option B: read from DB (role column on etl_upload_log)
+
+    # Option B: DB lookup (NEW TABLE)
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cur  = conn.cursor()
+
         cur.execute(
-            "SELECT role FROM etl_upload_log WHERE user_id = %s LIMIT 1",
+            "SELECT role FROM user_roles WHERE user_id = %s",
             (user_id,)
         )
         row = cur.fetchone()
+
         cur.close()
         conn.close()
+
         if row and row[0] == "admin":
             return "admin"
-    except Exception:
-        pass
-    return "user"
 
+    except Exception as e:
+        print("Role fetch error:", e)
+
+    return "user"
 
 def is_admin() -> bool:
     """Convenience helper — True when the logged-in user is an admin."""
@@ -85,8 +84,8 @@ def is_admin() -> bool:
 
 
 # --- CHANGE START --- PATCH 1: Supabase credentials from environment variables
-SUPABASE_URL      = os.getenv("SUPABASE_URL", "")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+SUPABASE_URL      = os.getenv("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 # --- CHANGE END ---
 
 @st.cache_resource
@@ -1058,7 +1057,8 @@ if not is_logged_in():
     st.stop()
 # --- LOGIN GATE ADD END ---
 
-
+st.write("SESSION UUID:", st.session_state.user_id)
+st.write("SESSION ROLE:", st.session_state.user_role)
 
 
 
