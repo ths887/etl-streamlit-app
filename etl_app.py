@@ -13,6 +13,12 @@ from dotenv import load_dotenv
 load_dotenv()  # reads .env file from project root at startup
 # --- CHANGE END ---
 
+def load_css(file_name):
+    with open(file_name) as f:
+        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+
+load_css("style.css")
+
 # ═══════════════════════════════════════════════════════════
 # 1. CONFIG
 # ═══════════════════════════════════════════════════════════
@@ -934,17 +940,17 @@ def show_login_page():
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         st.markdown("""
-            <h1 style="text-align:center; color:#1e293b; margin-top:10px;">
+            <h1 style="text-align:center; color:#ffffff; margin-top:10px;">
                 🔀 ETL Visual Data Mapper
             </h1>
-            <p style="text-align:center; color:#64748b; margin-bottom:10px;">
+            <p style="text-align:center; color:#ffffff; margin-bottom:10px;">
                 Sign in or create an account
             </p>
         """, unsafe_allow_html=True)
 
-        st.markdown("<p style='text-align:center; margin-bottom:5px;'>Choose Action</p>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align:center; color:#facc15; margin-bottom:5px;'>Choose Action</p>", unsafe_allow_html=True)
         mode = st.radio("", ["Sign In", "Sign Up"], horizontal=True)
-        st.markdown(f"<h3 style='text-align:center;'>🔐 {mode}</h3>", unsafe_allow_html=True)
+        st.markdown(f"<h3 style='text-align:center; color:#ffffff;'>🔐 {mode}</h3>", unsafe_allow_html=True)
 
         email    = st.text_input("Email",    placeholder="you@example.com")
         password = st.text_input("Password", placeholder="••••••••", type="password")
@@ -1050,12 +1056,21 @@ def init_state():
 
 init_state()
 
-# --- LOGIN GATE ADD START ---
-# Place this block immediately after init_state()
+
+
 if not is_logged_in():
     show_login_page()
     st.stop()
-# --- LOGIN GATE ADD END ---
+
+
+
+
+
+st.markdown(
+    f"<p style='color:#facc15; font-weight:600; padding:7px;'>SESSION ROLE: "
+    f"<span style='color:#ffffff'>{st.session_state.user_role}</span></p>",
+    unsafe_allow_html=True
+)
 
 st.write("SESSION UUID:", st.session_state.user_id)
 st.write("SESSION ROLE:", st.session_state.user_role)
@@ -1240,6 +1255,7 @@ def render_search_and_file_list():
     font-size:22px;
     font-weight:600;
     margin-bottom:8px;
+    color: #ffffff;
 ">
 🔍 Search Uploaded Files
 </h3>
@@ -1551,6 +1567,7 @@ def step_upload():
     font-size:22px;
     font-weight:600;
     margin-bottom:8px;
+    color:#ffffff;            
 ">
 📂 Step 1 - Upload Source File
 </h3>
@@ -1584,9 +1601,12 @@ def step_upload():
         st.dataframe(df.head(5), use_container_width=True)
 
     st.markdown(
-        f"**{len(df.columns)} source columns:** "
-        + "  ".join([f"`{c}`" for c in df.columns[:14]])
-        + ("…" if len(df.columns) > 14 else "")
+    f"<p style='color:#ffffff; font-size:14px;'>"
+    f"<b style='color:#facc15;'>{len(df.columns)} source columns:</b> "
+    + "  ".join([f"<span style='color:#e5e7eb;'>`{c}`</span>" for c in df.columns[:14]])
+    + ("…" if len(df.columns) > 14 else "")
+    + "</p>",
+    unsafe_allow_html=True
     )
 
     # ── NEW: Project name input here for early mapping suggestion ──
@@ -1656,10 +1676,12 @@ def step_mapping():
     font-size:22px;
     font-weight:600;
     margin-bottom:9px;
+    color: #ffffff;            
 ">
 🔀 Step 2 — Primary Field Mapping
 </h3>
 """, unsafe_allow_html=True )
+
 
     # ── NEW: Show project mapping banner if applicable ──
     proj_matched = st.session_state.get("proj_auto_mapped", {})
@@ -1790,6 +1812,7 @@ def step_attributes():
     font-size:22px;
     font-weight:600;
     margin-bottom:9px;
+    color: #ffffff;            
 ">
 🏷️ Step 3 — Attribute Grouping
 </h3>
@@ -1803,7 +1826,7 @@ def step_attributes():
     filtered = [c for c in available if search.lower() in c.lower()] if search else available
 
     st.markdown(
-        f'<div style="font-size:12px;color:#6b7280;margin:4px 0 8px">'
+        f'<div style="font-size:12px;color:#ffffff;margin:4px 0 8px">'
         f'Showing <strong>{len(filtered)}</strong> of <strong>{len(available)}</strong> '
         f'available columns</div>',
         unsafe_allow_html=True,
@@ -1899,6 +1922,7 @@ def step_unmapped():
     font-size:22px;
     font-weight:600;
     margin-bottom:9px;
+    color:#ffffff;            
 ">
 🚫 Step 4 — Unmapped Fields
 </h3>
@@ -1918,7 +1942,7 @@ def step_unmapped():
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
     if unmapped:
-        st.markdown("#### Columns stored as unmapped")
+        st.markdown("<h4 style='color:#ffffff;'>####Columns stored as unmapped</h4>",  unsafe_allow_html=True)
         col_a, col_b = st.columns(2)
         half = len(unmapped) // 2 + len(unmapped) % 2
         with col_a:
@@ -1956,6 +1980,7 @@ def step_summary():
     font-size:22px;
     font-weight:600;
     margin-bottom:9px;
+    color:#ffffff;            
 ">
 📋 Step 5 — Final Summary & Submit
 </h3>
@@ -2120,7 +2145,8 @@ def step_summary():
 
 def step_result():
     progress_bar(6)
-    st.markdown("## ✅ Upload Complete!")
+    st.markdown("<h4 style='color:#ffffff;'>✅ Upload Complete!</h4>",
+    unsafe_allow_html=True)
 
     result_df = pd.DataFrame([{
         "File Name":     st.session_state.file_name,
@@ -2134,7 +2160,9 @@ def step_result():
         "Unmapped":      len(st.session_state.unmapped_fields),
         "Status":        "✅ Complete",
     }])
-    st.markdown("### 📊 Upload Result")
+    st.markdown("<h4 style='color:#ffffff;'>📊 Upload Result</h4>",
+    unsafe_allow_html=True
+)
     st.dataframe(result_df, use_container_width=True, hide_index=True)
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
@@ -2153,7 +2181,8 @@ def step_result():
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
     # ── FULL CRUD Records Manager ──────────────────────────
-    st.markdown("### 🗃️ All Uploaded Records")
+    st.markdown("<h4 style='color:#ffffff;'>🗃️ All Uploaded Records</h4>",
+    unsafe_allow_html=True)
 
     admin = is_admin()
 
@@ -2290,20 +2319,24 @@ def step_result():
     # Field Mapping / Attributes / Unmapped summary tables
     mapped = {c: v for c, v in st.session_state.mapping.items() if v != "— skip —"}
     if mapped:
-        st.markdown("### 🔀 Field Mapping")
+        st.markdown("<h4 style='color:#ffffff;'>🔀 Field Mapping</h4>",
+    unsafe_allow_html=True
+)
         st.dataframe(
             pd.DataFrame([(s, "→", t) for s, t in mapped.items()],
                          columns=["Source Field", "", "Target Field"]),
             use_container_width=True, hide_index=True,
         )
     if st.session_state.attr_selected:
-        st.markdown("### 🏷️ Attribute Fields")
+        st.markdown("<h4 style='color:#ffffff;'>🏷️ Attribute Fields</h4>",
+    unsafe_allow_html=True)
         st.dataframe(
             pd.DataFrame(st.session_state.attr_selected, columns=["Attribute Column"]),
             use_container_width=True, hide_index=True,
         )
     if st.session_state.unmapped_fields:
-        st.markdown("### ⚠️ Unmapped Fields")
+        st.markdown("<h4 style='color:#ffffff;'>⚠️ Unmapped Fields</h4>",
+    unsafe_allow_html=True)
         st.dataframe(
             pd.DataFrame(st.session_state.unmapped_fields, columns=["Unmapped Column"]),
             use_container_width=True, hide_index=True,
@@ -2341,16 +2374,16 @@ def main():
     top_l, top_r = st.columns([8, 2])
     with top_l:
         st.markdown(
-            '<h1 style="font-size:26px;font-weight:700;color:#1e293b;margin-bottom:2px;margin-top:15px">'
+            '<h1 style="font-size:26px;font-weight:700;color:#ffffff;margin-bottom:2px;margin-top:15px">'
             '🔀 ETL Visual Data Mapper</h1>'
-            '<p style="font-size:14px;color:#64748b;margin-bottom:22px">'
+            '<p style="font-size:14px;color:#ffffff;margin-bottom:22px">'
             'Map source file columns to target fields — step by step</p>',
             unsafe_allow_html=True,
         )
     with top_r:
         role_label = "🔴 Admin" if is_admin() else "👤 User"
         st.markdown(
-            f'<div style="text-align:right;font-size:12px;color:#6b7280;padding-top:8px">'
+            f'<div style="text-align:right;font-size:12px;color:#ffffff;padding-top:8px">'
             f'{role_label} &nbsp;·&nbsp; {st.session_state.get("user_email", "")}</div>',
             unsafe_allow_html=True,
         )

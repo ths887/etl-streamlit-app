@@ -1,0 +1,167 @@
+html, body, [data-testid="stAppViewContainer"] {
+    background-color: hsl(215, 62%, 30%) !important;
+}
+
+[data-testid="stHeader"] {
+    background-color: hsl(215, 62%, 30%) !important;
+}
+
+[data-testid="stToolbar"] {
+    right: 2rem;
+}
+            
+/* Radio label text (Sign In / Sign Up) */
+div[role="radiogroup"] label {
+    color: #facc15 !important;   /* yellow */
+    font-weight: 600;
+}
+
+/* Selected option */
+div[role="radiogroup"] input:checked + div {
+    color: #ffffff !important;   /* white for active */
+}
+
+/* Optional: hover effect */
+div[role="radiogroup"] label:hover {
+    color: #fde047 !important;
+}
+
+/* Input box (Email & Password) */
+input[type="text"], input[type="password"] {
+    background-color: #1e293b !important;  /* dark box */
+    color: #ffffff !important;             /* text color */
+    border: 1px solid #facc15 !important;  /* yellow border */
+    border-radius: 6px;
+}
+
+/* Placeholder text */
+input::placeholder {
+    color: #94a3b8 !important;
+}
+
+/* Labels (Email / Password text) */
+label {
+    color: #facc15 !important;  /* yellow */
+    font-weight: 600;
+}
+
+
+/* Expander header */
+[data-testid="stExpander"] summary {
+    background-color: #334155 !important;  /* light navy */
+    color: #facc15 !important;             /* yellow text */
+    padding: 10px;
+    border-radius: 8px;
+    font-weight: 600;
+}
+
+/* Hover effect */
+[data-testid="stExpander"] summary:hover {
+    background-color: #475569 !important;
+}
+
+/* Expander content box */
+[data-testid="stExpander"] div[role="region"] {
+    background-color: #1e293b !important;  /* darker panel */
+    padding: 15px;
+    border-radius: 8px;
+    color: #ffffff !important;
+}
+
+/* Caption text */
+[data-testid="stCaptionContainer"] {
+    color: #facc15 !important;   /* yellow */
+    font-size: 13px;
+    font-weight: 500;
+}
+
+/* Info box background */
+[data-testid="stAlert"][data-baseweb="notification"] {
+    background-color: #1e293b !important;   /* dark navy */
+    border: 1px solid #facc15 !important;   /* yellow border */
+    border-radius: 8px;
+}
+
+/* Info text */
+[data-testid="stAlert"] p {
+    color: #ffffff !important;              /* white text */
+    font-weight: 500;
+}
+
+/* Optional: icon color */
+[data-testid="stAlert"] svg {
+    color: #facc15 !important;
+}
+
+/* Metric VALUE (this is what you want white) */
+[data-testid="stMetricValue"] {
+    color: #ffffff !important;
+}
+
+/* Metric LABEL (optional – yellow like your theme) */
+[data-testid="stMetricLabel"] {
+    color: #facc15 !important;
+}
+
+/* Optional: make it slightly bolder */
+[data-testid="stMetricValue"] > div {
+    font-weight: 600;
+}
+
+/* Force ALL checkbox labels to white */
+[data-testid="stCheckbox"] label,
+[data-testid="stCheckbox"] p,
+[data-testid="stCheckbox"] span {
+    color: #ffffff !important;
+}
+
+/* Optional: checkbox tick color */
+[data-testid="stCheckbox"] input {
+    accent-color: #facc15 !important;  /* yellow tick */
+}
+
+.input-card-title {
+    background-color: #ffffff;
+    padding: 8px 12px;
+    border-radius: 6px;
+    border-left: 4px solid #facc15;
+}
+.panel-header {
+    color: #ffffff;
+}
+/* Spinner text */
+[data-testid="stSpinner"] p {
+    color: #ffffff !important;
+    font-weight: 500;
+}
+
+/* Spinner icon (optional yellow) */
+[data-testid="stSpinner"] svg {
+    color: #facc15 !important;
+}
+
+/* WARNING (yellow theme) */
+[data-testid="stAlert"][data-baseweb="notification"][kind="warning"] {
+    background-color: #1e293b !important;   /* dark card */
+    border-left: 4px solid #facc15 !important;
+    border-radius: 8px;
+}
+[data-testid="stAlert"][kind="warning"] p {
+    color: #ffffff !important;              /* text white */
+}
+[data-testid="stAlert"][kind="warning"] svg {
+    color: #facc15 !important;              /* icon yellow */
+}
+
+/* ERROR (red theme) */
+[data-testid="stAlert"][data-baseweb="notification"][kind="error"] {
+    background-color: #1e293b !important;
+    border-left: 4px solid #ef4444 !important;  /* red accent */
+    border-radius: 8px;
+}
+[data-testid="stAlert"][kind="error"] p {
+    color: #ffffff !important;
+}
+[data-testid="stAlert"][kind="error"] svg {
+    color: #ef4444 !important;
+}
