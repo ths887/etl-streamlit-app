@@ -1072,8 +1072,6 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.write("SESSION UUID:", st.session_state.user_id)
-st.write("SESSION ROLE:", st.session_state.user_role)
 
 
 
