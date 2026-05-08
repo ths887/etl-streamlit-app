@@ -7,6 +7,7 @@ import psycopg2
 import psycopg2.extras
 from datetime import datetime
 from supabase import create_client, Client
+import streamlit.components.v1 as components
 
 # --- CHANGE START --- PATCH 1: Load credentials from .env via environment variables
 from dotenv import load_dotenv
@@ -58,9 +59,9 @@ ADMIN_EMAILS: set[str] = {
 }
 
 def get_role_for_user(user_id: str, user_email: str) -> str:
-    # Option A: hardcoded admin list
-    if user_email and user_email.lower() in {e.lower() for e in ADMIN_EMAILS}:
-        return "admin"
+    # Option A: hardcoded admin list — DISABLED: using DB roles only
+    # if user_email and user_email.lower() in {e.lower() for e in ADMIN_EMAILS}:
+    #     return "admin"
 
     # Option B: DB lookup (NEW TABLE)
     try:
@@ -92,6 +93,9 @@ def is_admin() -> bool:
 # --- CHANGE START --- PATCH 1: Supabase credentials from environment variables
 SUPABASE_URL      = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+# --- ADD START --- Site URL used as redirect_to in password-reset emails
+SUPABASE_SITE_URL = os.getenv("SUPABASE_SITE_URL", "http://localhost:8501")
+# --- ADD END ---
 # --- CHANGE END ---
 
 @st.cache_resource
@@ -932,8 +936,56 @@ def fetch_etl_data_for_log_with_taxonomy(log_id: int, taxonomy_filter: str = "")
 # --- MOVE START ---
 # --- CHANGE START --- PATCH 2: is_logged_in helper for strict session gate
 def is_logged_in():
-    return st.session_state.get("user_id") is not None
+
+    if st.session_state.get("user_id") is not None:
+        return True
+
+    if st.query_params.get("logged_in") == "true":
+        return True
+
+    return False
 # --- CHANGE END ---
+
+
+# --- ADD START --- RESET PASSWORD PAGE
+def show_reset_password_page():
+    """
+    Shown when an access_token query-param is detected in the URL.
+    The user lands here after clicking the Supabase password-reset email link.
+    """
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("""
+            <h1 style="text-align:center; color:#ffffff; margin-top:10px;">
+                🔀 ETL Visual Data Mapper
+            </h1>
+            <h3 style="text-align:center; color:#ffffff;">🔑 Set New Password</h3>
+        """, unsafe_allow_html=True)
+
+        new_pw  = st.text_input("New Password",     type="password", placeholder="Min 6 characters")
+        conf_pw = st.text_input("Confirm Password", type="password", placeholder="Repeat new password")
+
+        if st.button("Update Password", type="primary", use_container_width=True):
+            if not new_pw or not conf_pw:
+                st.error("Please fill in both password fields.")
+                return
+            if len(new_pw) < 6:
+                st.error("Password must be at least 6 characters.")
+                return
+            if new_pw != conf_pw:
+                st.error("Passwords do not match. Please try again.")
+                return
+            try:
+                supabase = get_supabase()
+                supabase.auth.update_user({"password": new_pw})
+                st.success("✅ Password updated successfully! You can now sign in with your new password.")
+                st.info("Redirecting to login…")
+                # Clear the token from query params so the reset page doesn't re-appear
+                st.query_params.clear()
+                st.rerun()
+            except Exception as e:
+                st.error(f"Password update failed: {e}")
+# --- ADD END ---
 
 
 def show_login_page():
@@ -949,13 +1001,21 @@ def show_login_page():
         """, unsafe_allow_html=True)
 
         st.markdown("<p style='text-align:center; color:#facc15; margin-bottom:5px;'>Choose Action</p>", unsafe_allow_html=True)
-        mode = st.radio("", ["Sign In", "Sign Up"], horizontal=True)
+        # --- FIX START --- Reliable signup redirect: default_mode forces radio back to Sign In
+        default_mode = 0 if not st.session_state.get("signup_success") else 0
+        mode = st.radio("", ["Sign In", "Sign Up"], horizontal=True, index=default_mode)
+        # --- FIX END ---
         st.markdown(f"<h3 style='text-align:center; color:#ffffff;'>🔐 {mode}</h3>", unsafe_allow_html=True)
 
         email    = st.text_input("Email",    placeholder="you@example.com")
         password = st.text_input("Password", placeholder="••••••••", type="password")
 
         if mode == "Sign In":
+            # --- FIX START --- Show signup success banner if redirected from Sign Up
+            if st.session_state.get("signup_success"):
+                st.success("✅ Account created! Check your email to confirm before signing in.")
+                st.session_state.signup_success = False   # clear after displaying once
+            # --- FIX END ---
             
             if st.button("Sign In", type="primary", use_container_width=True):
                 if not email or not password:
@@ -970,10 +1030,18 @@ def show_login_page():
                         st.error("Invalid login response. Please try again.")
                         return
                     # --- CHANGE START --- PATCH 2: Store all three auth keys on successful login
-                    st.session_state.user_id    = str(user.id)
+                    st.session_state.user_id = str(user.id)
                     st.session_state.user_email = user.email
-                    st.session_state.user_role  = get_role_for_user(str(user.id), user.email)
+                    st.session_state.user_role = get_role_for_user(
+                        str(user.id),
+                        user.email
+                    )
+
+                    # Persist Supabase session
+                    st.session_state.access_token = resp.session.access_token
+                    st.session_state.refresh_token = resp.session.refresh_token
                     # --- CHANGE END ---
+                    st.query_params["logged_in"] = "true"
                     st.success("Login successful!")
                     st.rerun()
                 except Exception as e:
@@ -983,6 +1051,36 @@ def show_login_page():
                         st.warning("You must confirm your email before signing in.")
                     else:
                         st.error(f"Login failed: {err_msg}")
+
+            # --- ADD START --- FORGOT PASSWORD section (inside Sign In tab)
+            st.markdown("<hr style='border-color:#ffffff33; margin:18px 0 10px;'>", unsafe_allow_html=True)
+            forgot_label = "🔒 Hide Forgot Password" if st.session_state.get("show_forgot_password") else "🔑 Forgot Password?"
+            if st.button(forgot_label, use_container_width=True):
+                st.session_state.show_forgot_password = not st.session_state.get("show_forgot_password", False)
+                st.session_state.reset_email_sent = False
+                st.rerun()
+
+            if st.session_state.get("show_forgot_password"):
+                st.markdown("<p style='color:#facc15; font-size:13px; margin-bottom:4px;'>Enter your account email to receive a reset link:</p>", unsafe_allow_html=True)
+                reset_email = st.text_input("Reset Email", placeholder="you@example.com", key="forgot_pw_email_input")
+                if st.button("Send Reset Email", type="primary", use_container_width=True, key="send_reset_btn"):
+                    if not reset_email.strip():
+                        st.error("Please enter your email address.")
+                    else:
+                        try:
+                            supabase = get_supabase()
+                            supabase.auth.reset_password_email(
+                                reset_email.strip(),
+                                options={"redirect_to": f"{SUPABASE_SITE_URL}"}
+                            )
+                            st.session_state.reset_email_sent = True
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Could not send reset email: {e}")
+
+                if st.session_state.get("reset_email_sent"):
+                    st.success("✅ Password reset email sent! Check your inbox (and spam folder). Click the link in the email to set a new password.")
+            # --- ADD END ---
 
         # --- CHANGE START --- PATCH 3: Sign Up with email confirmation message + input validation
         elif mode == "Sign Up":
@@ -1000,6 +1098,10 @@ def show_login_page():
                         "✅ Account created! **Check your email to confirm your account** "
                         "before signing in. (Check your spam folder if you don't see it within a minute.)"
                     )
+                    # --- FIX START --- Reliable redirect: set flag, rerun instantly (no sleep)
+                    st.session_state.signup_success = True
+                    st.rerun()   # radio resets to Sign In; banner shown by signup_success flag
+                    # --- FIX END ---
                 except Exception as e:
                     err_msg = str(e)
                     if "already registered" in err_msg.lower() or "already exists" in err_msg.lower():
@@ -1029,6 +1131,8 @@ def init_state():
         "upload_date":      None,
         "sku_count":        None,
         "df":               None,
+        "access_token": None,
+        "refresh_token": None,
         "source_columns":   [],
         "mapping":          {},
         "attr_selected":    [],
@@ -1049,6 +1153,13 @@ def init_state():
         "tax_search_mode":  "File-level (Recommended)",
         "tax_search_results": None,
         # NEW: view panel state per log_id stored dynamically
+        # --- ADD START --- Password-reset flow state
+        "show_forgot_password": False,   # toggles forgot-password panel inside Sign In
+        "reset_email_sent":     False,   # shows confirmation banner after email is sent
+        # --- ADD END ---
+        # --- FIX START --- Reliable signup redirect state (replaces time.sleep approach)
+        "signup_success":       False,   # set True after signup; cleared after redirect to Sign In
+        # --- FIX END ---
     }
     for k, v in etl_defaults.items():
         if k not in st.session_state:
@@ -1056,11 +1167,110 @@ def init_state():
 
 init_state()
 
+# Restore session after browser refresh
+if (
+    st.query_params.get("logged_in") == "true"
+    and not st.session_state.get("user_id")
+):
 
+    try:
+        supabase = get_supabase()
+
+        user = supabase.auth.get_user()
+
+        if user and user.user:
+
+            st.session_state.user_id = str(user.user.id)
+            st.session_state.user_email = user.user.email
+
+            st.session_state.user_role = get_role_for_user(
+                str(user.user.id),
+                user.user.email
+            )
+
+    except Exception:
+        pass
+
+# Restore Supabase session after browser refresh
+if (
+    st.session_state.get("access_token")
+    and not st.session_state.get("user_id")
+):
+    try:
+        supabase = get_supabase()
+
+        supabase.auth.set_session(
+            st.session_state.access_token,
+            st.session_state.refresh_token
+        )
+
+        user = supabase.auth.get_user().user
+
+        if user:
+            st.session_state.user_id = str(user.id)
+            st.session_state.user_email = user.email
+            st.session_state.user_role = get_role_for_user(
+                str(user.id),
+                user.email
+            )
+
+    except Exception:
+        # Invalid/expired token
+        st.session_state.access_token = None
+        st.session_state.refresh_token = None
+
+# --- FIX START --- Token-aware login gate (replaces bare is_logged_in check)
+# Supabase password-reset emails use a URL fragment (#access_token=...) NOT a query param.
+# Streamlit cannot read fragments server-side. The JS snippet below detects the fragment
+# and rewrites it as a real query param (?access_token=...) so st.query_params can see it.
+# This runs once on page load — it only fires when a fragment is present.
+components.html(
+    """
+    <script>
+    (function() {
+        const hash = window.location.hash;
+
+        if (hash && hash.includes("access_token")) {
+
+            const params = new URLSearchParams(hash.substring(1));
+
+            const accessToken  = params.get("access_token") || "";
+            const refreshToken = params.get("refresh_token") || "";
+            const type         = params.get("type") || "";
+
+            if (accessToken) {
+
+                const newUrl =
+                    window.location.pathname +
+                    "?access_token=" + encodeURIComponent(accessToken) +
+                    "&refresh_token=" + encodeURIComponent(refreshToken) +
+                    "&type=" + encodeURIComponent(type);
+
+                window.location.replace(newUrl);
+            }
+        }
+    })();
+    </script>
+    """,
+    height=0,
+)
+
+_qp = st.query_params
+if _qp.get("access_token") or _qp.get("type") == "recovery":
+    _token = _qp.get("access_token", "")
+    if _token:
+        try:
+            _sb = get_supabase()
+            _sb.auth.set_session(_token, _qp.get("refresh_token", ""))
+        except Exception:
+            pass  # update_user() will surface a clear error if token is invalid
+    show_reset_password_page()
+    st.stop()
 
 if not is_logged_in():
     show_login_page()
     st.stop()
+# --- FIX END ---
 
 
 
@@ -1072,8 +1282,6 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.write("SESSION UUID:", st.session_state.user_id)
-st.write("SESSION ROLE:", st.session_state.user_role)
 
 
 
@@ -2363,6 +2571,25 @@ def step_result():
 # ═══════════════════════════════════════════════════════════
 
 def main():
+    # --- ADD START --- RESET PASSWORD FLOW: detect access_token in URL query params
+    # Supabase appends access_token to the redirect URL when the user clicks
+    # the password-reset link in their email. Detect it here and show the
+    # reset page instead of the normal login page.
+    query = st.query_params
+    if query.get("access_token") or query.get("type") == "recovery":
+        access_token = query.get("access_token", "")
+        if access_token:
+            try:
+                supabase = get_supabase()
+                # Set the session so update_user() works for this token
+                supabase.auth.set_session(access_token, query.get("refresh_token", ""))
+            except Exception:
+                pass  # best-effort; update_user will fail with a clear error if invalid
+        show_reset_password_page()
+        st.stop()
+        return
+    # --- ADD END ---
+
     # --- CHANGE START --- PATCH 2: Strict login gate using is_logged_in() + st.stop()
     if not is_logged_in():
         show_login_page()
