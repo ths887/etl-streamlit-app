@@ -404,7 +404,7 @@ CREATE TABLE IF NOT EXISTS user_roles (
 );
 
 INSERT INTO user_roles (user_id, user_email, role)
-VALUES ('d04c7987-b833-4651-b8c5-57be1ba974d9', 'govind@altiusnxt.com', 'admin');
+VALUES ('894fb229-ee51-4e44-af4c-39218980378f', 'govind@altiusnxt.com', 'admin');
 
 UPDATE user_roles
 SET user_email = 'govind@altiusnxt.com',
