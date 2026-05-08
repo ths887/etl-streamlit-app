@@ -257,10 +257,10 @@ FROM etl_upload_log;
 
 
 -- Option A — promote by email (recommended):
-UPDATE etl_upload_log SET role = 'admin' WHERE user_email = 'govind@altiusnxt.com';
+---UPDATE etl_upload_log SET role = 'admin' WHERE user_email = 'govind@altiusnxt.com';
 --
 -- Option B — promote by UUID:
-UPDATE etl_upload_log SET role = 'admin' WHERE user_id = 'd04c7987-b833-4651-b8c5-57be1ba974d9';
+--UPDATE etl_upload_log SET role = 'admin' WHERE user_id = 'd04c7987-b833-4651-b8c5-57be1ba974d9';
 --
 -- Tip: you can also skip the DB step entirely and just add the email
 --      to ADMIN_EMAILS in final1_v4.py — that's checked first at login.
@@ -404,7 +404,7 @@ CREATE TABLE IF NOT EXISTS user_roles (
 );
 
 INSERT INTO user_roles (user_id, user_email, role)
-VALUES ('894fb229-ee51-4e44-af4c-39218980378f', 'govind@altiusnxt.com', 'admin');
+VALUES ('489af401-a14f-488c-8488-1599597a11aa', 'thushara@altiusnxt.com', 'admin');
 
 UPDATE user_roles
 SET user_email = 'govind@altiusnxt.com',
