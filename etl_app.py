@@ -637,26 +637,7 @@ def fetch_all_etl_export(user_id: str) -> pd.DataFrame:
         conn.close()             
 
 
-def hard_delete_log(log_id: int):
-    """Soft-delete log row AND all linked etl_data rows atomically.
-    ADMIN ONLY — raises PermissionError if caller is not admin.
-    """
-    if st.session_state.get("user_role") != "admin":
-        raise PermissionError("Only admin users can delete records.")
-    conn = get_conn()
-    cur  = conn.cursor()
-    try:
-        cur.execute("UPDATE etl_upload_log SET status='deleted' WHERE id=%s", (log_id,))
-        cur.execute("UPDATE etl_data SET status='deleted' WHERE upload_log_id=%s", (log_id,))
-        conn.commit()
-    except PermissionError:
-        raise
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        cur.close()
-        conn.close()
+
 
 
 def hard_delete_log(log_id: int):
@@ -1116,19 +1097,21 @@ init_state()
 # ── Restore session + page after refresh ──
 qp = st.query_params
 
-if not st.session_state.get("user_id"):
+if (
+    not st.session_state.get("user_id")
+    and qp.get("uid")
+    and qp.get("email")
+):
 
-    if qp.get("uid"):
+    st.session_state.user_id = qp.get("uid")
+    st.session_state.user_email = qp.get("email")
+    st.session_state.user_role = qp.get("role", "user")
 
-        st.session_state.user_id = qp.get("uid")
-        st.session_state.user_email = qp.get("email")
-        st.session_state.user_role = qp.get("role", "user")
-
-        try:
-            st.session_state.step = int(qp.get("step", 1))
-        except:
-            st.session_state.step = 1
-            st.query_params["step"] = "1"
+    try:
+        st.session_state.step = int(qp.get("step", 1))
+    except:
+        st.session_state.step = 1
+        st.query_params["step"] = "1"
 
 # ── Login gate ──
 if not is_logged_in():
@@ -1791,7 +1774,7 @@ def step_upload():
         st.session_state.auto_mapped        = fuzzy_suggestions
         st.session_state.proj_auto_mapped   = proj_matched   # NEW: track project-template matches
         st.session_state.project_name       = project_hint if project_hint else st.session_state.project_name
-        st.session_state.step               = 2
+        st.session_state.step               = "2"
         st.rerun()
 
 
@@ -2543,8 +2526,27 @@ def main():
         )
         # --- AUTH FIX START ---
         if st.button("🚪 Logout", use_container_width=True):
+
+            try:
+                get_supabase().auth.sign_out()
+            except Exception as e:
+                print("Logout error:", e)
+
+            # Clear URL params completely
+            st.query_params.clear()
+
+            # Clear ALL session state
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
+
+            # Reinitialize clean defaults
+            st.session_state.user_id = None
+            st.session_state.user_email = None
+            st.session_state.user_role = "user"
+            st.session_state.step = 1
+
+            st.success("Logged out successfully.")
+
             st.rerun()
         # --- AUTH FIX END ---
 
