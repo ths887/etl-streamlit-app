@@ -997,8 +997,7 @@ def show_login_page():
                     supabase = get_supabase()
                     supabase.auth.sign_up({"email": email, "password": password})
                     st.success(
-                        "✅ Account created! **Check your email to confirm your account** "
-                        "before signing in. (Check your spam folder if you don't see it within a minute.)"
+                        "✅ Account created! Please Sign in"
                     )
                 except Exception as e:
                     err_msg = str(e)
