@@ -3,6 +3,7 @@ import os
 import re
 import streamlit as st
 import pandas as pd
+from io import BytesIO
 import psycopg2
 import psycopg2.extras
 from datetime import datetime
@@ -588,8 +589,55 @@ def fetch_etl_data_for_log(log_id: int) -> pd.DataFrame:
     finally:
         conn.close()
 
+def fetch_full_etl_export(log_id: int) -> pd.DataFrame:
+    """
+    Return FULL ETL dataset for export/download.
+    Includes all columns from etl_data.
+    """
 
-def soft_delete_log(log_id: int):
+    conn = get_conn()
+
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT *
+            FROM etl_data
+            WHERE upload_log_id = %s
+            ORDER BY asn_altiusnxt_stock_number
+            """,
+            conn,
+            params=(log_id,)
+        )
+
+        return df
+
+    finally:
+        conn.close()   
+
+def fetch_all_etl_export(user_id: str) -> pd.DataFrame:
+
+    conn = get_conn()
+
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT *
+            FROM etl_data
+            WHERE user_id = %s
+              AND status = 'active'
+            ORDER BY upload_date DESC
+            """,
+            conn,
+            params=(user_id,)
+        )
+
+        return df
+
+    finally:
+        conn.close()             
+
+
+def hard_delete_log(log_id: int):
     """Soft-delete log row AND all linked etl_data rows atomically.
     ADMIN ONLY — raises PermissionError if caller is not admin.
     """
@@ -803,8 +851,11 @@ def fetch_upload_logs_paginated(
     """
     conn = get_conn()
     params = []
-    where_clauses = ["l.user_id = %s", "l.status = 'active'"]
-    params.append(user_id)
+    where_clauses = ["l.status = 'active'"]
+
+    if not is_admin():
+        where_clauses.append("l.user_id = %s")
+        params.append(user_id)
 
     if project_name_filter.strip():
         where_clauses.append("l.project_name ILIKE %s")
@@ -973,6 +1024,9 @@ def show_login_page():
                     st.session_state.user_id    = str(user.id)
                     st.session_state.user_email = user.email
                     st.session_state.user_role  = get_role_for_user(str(user.id), user.email)
+                    st.query_params["uid"] = str(user.id)
+                    st.query_params["email"] = user.email
+                    st.query_params["role"] = st.session_state.user_role
                     # --- CHANGE END ---
                     st.success("Login successful!")
                     st.rerun()
@@ -1053,14 +1107,33 @@ def init_state():
         if k not in st.session_state:
             st.session_state[k] = v
 
+
+
 init_state()
 
 
 
+# ── Restore session + page after refresh ──
+qp = st.query_params
+
+if not st.session_state.get("user_id"):
+
+    if qp.get("uid"):
+
+        st.session_state.user_id = qp.get("uid")
+        st.session_state.user_email = qp.get("email")
+        st.session_state.user_role = qp.get("role", "user")
+
+        try:
+            st.session_state.step = int(qp.get("step", 1))
+        except:
+            st.session_state.step = 1
+            st.query_params["step"] = "1"
+
+# ── Login gate ──
 if not is_logged_in():
     show_login_page()
     st.stop()
-
 
 
 
@@ -1080,15 +1153,29 @@ st.markdown(
 # ═══════════════════════════════════════════════════════════
 
 def progress_bar(current: int):
-    labels = ["1 Upload", "2 Field Mapping", "3 Attributes",
-              "4 Unmapped", "5 Summary", "✔ Result"]
-    html = '<div class="step-bar">'
-    for i, lbl in enumerate(labels, 1):
-        css = "step-item active" if i == current else ("step-item done" if i < current else "step-item")
-        html += f'<div class="{css}">{lbl}</div>'
-    html += "</div>"
-    st.markdown(html, unsafe_allow_html=True)
+    labels = {
+        1: "1 Upload",
+        2: "2 Field Mapping",
+        3: "3 Attributes",
+        4: "4 Unmapped",
+        5: "5 Summary",
+        6: "✔ Result",
+    }
+    cols = st.columns(6)
 
+    for step_num, col in zip(labels.keys(), cols):
+
+        button_type = "primary" if step_num == current else "secondary"
+
+        if col.button(
+            labels[step_num],
+            key=f"nav_step_{step_num}",
+            use_container_width=True,
+            type=button_type,
+        ):
+            st.session_state.step = step_num
+            st.query_params["step"] = str(step_num)
+            st.rerun()
 
 def file_info_strip():
     if st.session_state.file_name:
@@ -1350,6 +1437,48 @@ def render_search_and_file_list():
 
     rows = st.session_state.file_list_rows
 
+        # ── Global Export Section ──
+   # st.markdown("### ⬇ Export All Uploaded Files")
+
+    try:
+
+        export_df = fetch_all_etl_export(uid)
+
+        if not export_df.empty:
+
+            # CSV Export
+            csv_data = export_df.to_csv(index=False).encode("utf-8")
+
+            st.download_button(
+                label="⬇ Download ALL as CSV",
+                data=csv_data,
+                file_name="all_uploaded_etl_data.csv",
+                mime="text/csv",
+                key="download_all_csv",
+            )
+
+            # Remove timezone info for Excel compatibility
+            for col in export_df.columns:
+                if pd.api.types.is_datetime64tz_dtype(export_df[col]):
+                    export_df[col] = export_df[col].dt.tz_localize(None)
+
+            # Excel Export
+            excel_buffer = BytesIO()
+
+            with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+                export_df.to_excel(writer, index=False)
+
+            st.download_button(
+                label="⬇ Download ALL as Excel",
+                data=excel_buffer.getvalue(),
+                file_name="all_uploaded_etl_data.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_all_excel",
+            )
+
+    except Exception as e:
+        st.error(f"Global export failed: {e}")
+
     if not rows:
         st.info("No uploaded files found. Try adjusting search filters.")
     else:
@@ -1411,6 +1540,8 @@ def render_file_cards(rows: list, taxonomy_filter: str = ""):
             if st.button("👁 View File", key=f"fc_view_{rid}", use_container_width=True):
                 st.session_state[f"fc_show_{rid}"] = not st.session_state.get(f"fc_show_{rid}", False)
 
+   
+
             # ── Admin-only delete button (UI layer guard) ──
             if admin:
                 if st.button("🗑 Delete", key=f"fc_del_{rid}", use_container_width=True):
@@ -1418,11 +1549,11 @@ def render_file_cards(rows: list, taxonomy_filter: str = ""):
 
         # Admin delete confirmation
         if admin and st.session_state.get(f"fc_confirm_del_{rid}"):
-            st.warning(f"⚠️ Soft-delete record #{rid}? It will be hidden from all views.")
+            st.warning(f"⚠️ Permanently delete this file and all linked ETL data?This action cannot be undone.{rid}?")
             dc1, dc2 = st.columns(2)
             if dc1.button("✅ Yes, Delete", key=f"fc_del_yes_{rid}", type="primary"):
                 try:
-                    soft_delete_log(rid)
+                    hard_delete_log(rid)
                     st.session_state.pop(f"fc_confirm_del_{rid}", None)
                     st.session_state.file_list_rows = [
                         r for r in st.session_state.file_list_rows if int(r["id"]) != rid
@@ -1532,6 +1663,9 @@ def render_taxonomy_search_section():
                         if st.button("👁 View File", key=f"tax_view_{lid}", use_container_width=True):
                             tk = f"tax_show_{lid}"
                             st.session_state[tk] = not st.session_state.get(tk, False)
+                            
+                            
+                            not st.session_state.get(tk, False)
 
                     if st.session_state.get(f"tax_show_{lid}", False):
                         try:
@@ -1669,6 +1803,10 @@ def step_mapping():
     progress_bar(2)
     file_info_strip()
 
+    if st.session_state.df is None:
+        st.warning("No file uploaded yet.")
+        return
+
     st.markdown("""
 <h3 style="
     font-size:22px;
@@ -1778,6 +1916,7 @@ def step_mapping():
     with n1:
         if st.button("← Back to Upload", disabled=(page > 0)):
             st.session_state.step = 1
+            st.query_params["step"] = "1"
             st.rerun()
     with n2:
         if st.button("⬅ Prev", disabled=(page == 0)):
@@ -1804,6 +1943,10 @@ def step_mapping():
 def step_attributes():
     progress_bar(3)
     file_info_strip()
+
+    if st.session_state.df is None:
+        st.warning("No file uploaded yet.")
+        return
 
     st.markdown("""
 <h3 style="
@@ -1900,10 +2043,12 @@ def step_attributes():
     with b1:
         if st.button("← Back to Mapping"):
             st.session_state.step = 2
+            st.query_params["step"] = "2"
             st.rerun()
     with b3:
         if st.button("Next: Unmapped Fields →", type="primary", use_container_width=True):
             st.session_state.step = 4
+            st.query_params["step"] = "4"
             st.rerun()
 
 
@@ -1914,6 +2059,10 @@ def step_attributes():
 def step_unmapped():
     progress_bar(4)
     file_info_strip()
+
+    if st.session_state.df is None:
+        st.warning("No file uploaded yet.")
+        return
 
     st.markdown("""
 <h3 style="
@@ -1958,10 +2107,12 @@ def step_unmapped():
     with b1:
         if st.button("← Back to Attributes"):
             st.session_state.step = 3
+            st.query_params["step"] = "3"
             st.rerun()
     with b3:
         if st.button("Next: Summary →", type="primary", use_container_width=True):
             st.session_state.step = 5
+            st.query_params["step"] = "5"
             st.rerun()
 
 
@@ -1972,6 +2123,10 @@ def step_unmapped():
 def step_summary():
     progress_bar(5)
     file_info_strip()
+
+    if st.session_state.df is None:
+        st.warning("No file uploaded yet.")
+        return
 
     st.markdown("""
 <h3 style="
@@ -2043,6 +2198,7 @@ def step_summary():
     with b1:
         if st.button("← Back to Unmapped"):
             st.session_state.step = 4
+            st.query_params["step"] = "4"
             st.rerun()
     with b3:
         if st.button("🚀 Submit & Upload", type="primary", use_container_width=True):
@@ -2149,7 +2305,7 @@ def step_result():
     result_df = pd.DataFrame([{
         "File Name":     st.session_state.file_name,
         "Date":          st.session_state.upload_date,
-        "SKU Count":     f"{st.session_state.sku_count:,}",
+        "SKU Count":     f"{int(st.session_state.sku_count or 0):,}",
         "Project Name":  st.session_state.project_name,
         "Batch Code":    st.session_state.batch_code,
         "Author":        st.session_state.get("user_email", "—"),
@@ -2240,26 +2396,26 @@ def step_result():
                         # Delete & Purge — admin only (UI layer + function layer guard)
                         if admin and a3 is not None:
                             if a3.button("🗑 Del", key=f"del_{rid}", use_container_width=True):
-                                st.session_state[f"confirm_del_{rid}"] = True
+                                st.session_state[f"fc_confirm_del_{rid}"] = True
 
                         if admin and a4 is not None:
                             if a4.button("💣 Purge", key=f"purge_{rid}", use_container_width=True):
-                                st.session_state[f"confirm_purge_{rid}"] = True
+                                st.session_state[f"fc_confirm_purge_{rid}"] = True
 
                     # Admin soft-delete confirmation
-                    if admin and st.session_state.get(f"confirm_del_{rid}"):
+                    if admin and st.session_state.get(f"fc_confirm_del_{rid}"):
                         st.warning(f"⚠️ Soft-delete record #{rid} and all its SKU data? It will be hidden from all views.")
                         dc1, dc2 = st.columns(2)
-                        if dc1.button("✅ Confirm Delete", key=f"confirm_del_yes_{rid}", type="primary"):
+                        if dc1.button("✅ Confirm Delete", key=f"fc_confirm_del_yes_{rid}", type="primary"):
                             try:
-                                soft_delete_log(rid)
-                                st.session_state.pop(f"confirm_del_{rid}", None)
+                                hard_delete_log(rid)
+                                st.session_state.pop(f"fc_confirm_del_{rid}", None)
                                 st.success(f"Record #{rid} soft-deleted.")
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Delete failed: {e}")
-                        if dc2.button("❌ Cancel", key=f"confirm_del_no_{rid}"):
-                            st.session_state.pop(f"confirm_del_{rid}", None)
+                        if dc2.button("❌ Cancel", key=f"fc_confirm_del_no_{rid}"):
+                            st.session_state.pop(f"fc_confirm_del_{rid}", None)
                             st.rerun()
 
                     # Admin hard-delete (purge) confirmation
