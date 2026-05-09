@@ -164,8 +164,7 @@ CREATE TABLE IF NOT EXISTS etl_data (
     unmapped                            JSONB
 );
 
-DROP TABLE etl_data;
-ALTER TABLE etle_data
+
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- SECTION 3 : TABLE — etl_mapping_template
@@ -334,21 +333,21 @@ ALTER TABLE etl_data ADD COLUMN overall_status TEXT;
 ALTER TABLE etl_data
 DROP COLUMN feature_bullets;
 
-WHERE file_name = '3M UK_Batch3_Data_510 SKUs.xlsx' AND status = 'active';
+--WHERE file_name = '3M UK_Batch3_Data_510 SKUs.xlsx' AND status = 'active';
 
 -- Soft-delete a file (admin runs this directly if needed)
 UPDATE etl_upload_log SET status = 'deleted' WHERE file_name = 'bad_file.xlsx';
 UPDATE etl_data        SET status = 'deleted' WHERE file_name = 'bad_file.xlsx';
 
 -- Hard-delete a log row (cascades to etl_data via FK)
-DELETE FROM etl_upload_log WHERE id = 3;
+--DELETE FROM etl_upload_log WHERE id = 3;
 
 -- Check how many files a user uploaded
-SELECT COUNT(*) FROM etl_upload_log WHERE author_name = 'thushara@altiusnxt.com';
+--SELECT COUNT(*) FROM etl_upload_log WHERE author_name = 'thushara@altiusnxt.com';
 
 -- Files per user ranked by SKU count
-SELECT file_name, COUNT(*) AS rows
-FROM etl_data GROUP BY file_name ORDER BY rows DESC;
+--SELECT file_name, COUNT(*) AS rows
+--FROM etl_data GROUP BY file_name ORDER BY rows DESC;
 
 -- Taxonomy search (file-level)
 SELECT l.id, l.project_name, l.batch_code, l.file_name, COUNT(*) AS matches
@@ -366,7 +365,7 @@ WHERE user_id = '<uuid>' AND status = 'active' AND project_name ILIKE '%3M%'
 ORDER BY upload_date DESC LIMIT 20 OFFSET 0;
 
 -- Database size
- SELECT pg_size_pretty(pg_database_size('Product_Data'));
+ --SELECT pg_size_pretty(pg_database_size('Product_Data'));
 
 -- Check all indexes on both tables
 SELECT indexname, tablename FROM pg_indexes
@@ -404,14 +403,14 @@ CREATE TABLE IF NOT EXISTS user_roles (
 );
 
 INSERT INTO user_roles (user_id, user_email, role)
-VALUES ('489af401-a14f-488c-8488-1599597a11aa', 'thushara@altiusnxt.com', 'admin');
+VALUES ('894fb229-ee51-4e44-af4c-39218980378f', 'govind@altiusnxt.com', 'admin');
 
-UPDATE user_roles
-SET user_email = 'govind@altiusnxt.com',
-    role = 'admin'
-WHERE user_id = 'd04c7987-b833-4651-b8c5-57be1ba974d9';
+--UPDATE user_roles
+--SET user_email = 'govind@altiusnxt.com',
+    --role = 'admin'
+--WHERE user_id = '894fb229-ee51-4e44-af4c-39218980378f';
 
-DELETE FROM user_roles;
+--DELETE FROM user_roles;
 
 SELECT user_id, user_email, role 
 FROM etl_upload_log
