@@ -1774,7 +1774,8 @@ def step_upload():
         st.session_state.auto_mapped        = fuzzy_suggestions
         st.session_state.proj_auto_mapped   = proj_matched   # NEW: track project-template matches
         st.session_state.project_name       = project_hint if project_hint else st.session_state.project_name
-        st.session_state.step               = "2"
+        st.session_state.step = 2
+        st.query_params["step"] = "2"
         st.rerun()
 
 
