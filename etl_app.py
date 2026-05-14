@@ -1755,22 +1755,77 @@ def render_file_cards(rows: list, taxonomy_filter: str = ""):
             # ── Admin-only permanent delete ──
             if admin:
 
-                if st.button("🗑 Delete", key=f"fc_del_{rid}", use_container_width=True):
+                confirm_key = f"fc_confirm_del_{rid}"
 
-                    try:
-                        hard_delete_log(rid)
+                # FIRST CLICK → show confirmation
+                if not st.session_state.get(confirm_key, False):
 
-                        st.session_state.file_list_rows = [
-                            r for r in st.session_state.file_list_rows
-                            if int(r["id"]) != rid
-                        ]
+                    if st.button(
+                        "🗑 Delete",
+                        key=f"fc_del_{rid}",
+                        use_container_width=True
+                    ):
 
-                        st.success(f"Record #{rid} permanently deleted.")
-
+                        st.session_state[confirm_key] = True
                         st.rerun()
 
-                    except Exception as e:
-                        st.error(f"Delete failed: {e}")
+                # CONFIRMATION UI
+                else:
+
+                    st.warning(
+                        "⚠ This will permanently delete:\n\n"
+                        "• Uploaded file\n"
+                        "• Cached parquet/state files\n"
+                        "• All related database records\n\n"
+                        "This action cannot be undone."
+                    )
+
+                    dc1, dc2 = st.columns(2)
+
+                    # CONFIRM DELETE
+                    with dc1:
+
+                        if st.button(
+                            "✅ Confirm Permanent Delete",
+                            key=f"fc_del_yes_{rid}",
+                            use_container_width=True
+                        ):
+
+                            try:
+
+                                hard_delete_log(rid)
+
+                                st.session_state.file_list_rows = [
+                                    r for r in st.session_state.file_list_rows
+                                    if int(r["id"]) != rid
+                                ]
+
+                                st.session_state.pop(confirm_key, None)
+
+                                st.success(
+                                    f"Record #{rid} permanently deleted."
+                                )
+
+                                st.rerun()
+
+                            except Exception as e:
+
+                                st.error(f"Delete failed: {e}")
+
+                    # CANCEL
+                    with dc2:
+
+                        if st.button(
+                            "❌ Cancel",
+                            key=f"fc_del_no_{rid}",
+                            use_container_width=True
+                        ):
+
+                            st.session_state.pop(confirm_key, None)
+
+                            st.info("Delete cancelled.")
+
+                            st.rerun()
         # ── Inline View Panel ──
         if st.session_state.get(f"fc_show_{rid}", False):
             try:
