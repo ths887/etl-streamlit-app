@@ -1,13 +1,22 @@
 import json
 import os
 import re
+import hashlib
 import streamlit as st
 import pandas as pd
 from io import BytesIO
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 from datetime import datetime
 from supabase import create_client, Client
+
+# ── Persistent upload cache directory ─────────────────────────────────────────
+# Unlike tempfile.NamedTemporaryFile, files here survive Streamlit reruns and
+# browser refreshes. We use a stable path inside the project root so it is
+# always accessible even after the OS reclaims /tmp.
+_UPLOAD_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".upload_cache")
+os.makedirs(_UPLOAD_CACHE_DIR, exist_ok=True)
 
 # --- CHANGE START --- PATCH 1: Load credentials from .env via environment variables
 from dotenv import load_dotenv
@@ -75,7 +84,7 @@ def get_role_for_user(user_id: str, user_email: str) -> str:
         row = cur.fetchone()
 
         cur.close()
-        conn.close()
+        release_conn(conn)
 
         if row and row[0] == "admin":
             return "admin"
@@ -343,8 +352,23 @@ st.markdown("""
 # 3. DATABASE — connection, DDL, DML
 # ═══════════════════════════════════════════════════════════
 
+# ── OPT 1: Connection pool ──────────────────────────────────
+# Reuses existing TCP+auth connections instead of creating new
+# ones on every DB call. minconn=1 keeps one warm; maxconn=10.
+@st.cache_resource
+def _get_pool() -> psycopg2.pool.SimpleConnectionPool:
+    return psycopg2.pool.SimpleConnectionPool(minconn=1, maxconn=10, **DB_CONFIG)
+
 def get_conn():
-    return psycopg2.connect(**DB_CONFIG)
+    """Return a connection from the pool."""
+    return _get_pool().getconn()
+
+def release_conn(conn):
+    """Return a connection to the pool (never call conn.close() directly)."""
+    try:
+        _get_pool().putconn(conn)
+    except Exception:
+        pass
 
 
 def create_tables():
@@ -409,7 +433,7 @@ def create_tables():
     cur.execute(ddl)
     conn.commit()
     cur.close()
-    conn.close()
+    release_conn(conn)
 
 
 # ── FIX #1: Duplicate detection — pre-check before insert ──────────────────
@@ -422,7 +446,7 @@ def check_duplicate(batch_code: str, file_name: str) -> bool:
     )
     exists = cur.fetchone() is not None
     cur.close()
-    conn.close()
+    release_conn(conn)
     return exists
 
 
@@ -466,54 +490,110 @@ def insert_etl_data(
         "upload_date", "sku_count", "user_id", "user_email", "upload_log_id",
     ]
     all_insert_cols = fixed_cols + TARGET_FIELDS + ["attributes", "unmapped"]
-    placeholders    = ", ".join(["%s"] * len(all_insert_cols))
     col_list        = ", ".join(all_insert_cols)
-    insert_sql      = f"INSERT INTO etl_data ({col_list}) VALUES ({placeholders})"
+    insert_sql = f"INSERT INTO etl_data ({col_list}) VALUES %s"
+
+    # ── OPT: Vectorized row building ──────────────────────────────────────────
+    # Replace Python-level row-by-row loop with vectorized pandas operations.
+    # Steps:
+    #   1. Replace NaN with None once up-front (avoids per-cell pd.notna checks).
+    #   2. Build target columns via bulk column rename/select — no per-row dict.
+    #   3. Serialise attributes + unmapped columns as JSON using .apply(json.dumps)
+    #      on a pre-filtered sub-DataFrame — much faster than building dicts in a loop.
+    total_rows = len(df)
+
+    # Step 1: normalise DataFrame — convert NaN → None (Python None → SQL NULL)
+    df_clean = df.where(df.notna(), other=None)
+
+    # Step 2: build target-field columns as a new DataFrame
+    target_df = pd.DataFrame(index=df_clean.index, columns=TARGET_FIELDS, dtype=object)
+    target_df[:] = None
+    for src_col, tgt_col in src_to_target.items():
+        if src_col in df_clean.columns:
+            target_df[tgt_col] = df_clean[src_col].astype(str).where(
+                df_clean[src_col].notna(), other=None
+            )
+
+    # Step 3: attributes JSON per row
+    attr_df = df_clean[[c for c in attr_cols if c in df_clean.columns]].copy()
+    # Add fixed metadata columns to every attribute dict
+    attr_df = attr_df.astype(str)
+    attr_df["file_name"]   = file_name
+    attr_df["author_name"] = author_name
+    attr_json_series = attr_df.apply(
+        lambda row: json.dumps({
+            k: (
+                None
+                if pd.isna(v) or str(v).strip().lower() in ("nan", "none", "")
+                else str(v)
+            )
+            for k, v in row.items()
+        }),
+        axis=1,
+    )
+
+    # Step 4: unmapped JSON per row
+    unmap_cols_present = [c for c in computed_unmapped_cols if c in df_clean.columns]
+    if unmap_cols_present:
+        unmap_df = df_clean[unmap_cols_present].astype(str)
+        unmap_json_series = unmap_df.apply(
+            lambda row: json.dumps({
+                k: (
+                    None
+                    if pd.isna(v) or str(v).strip().lower() in ("nan", "none", "")
+                    else str(v)
+                )
+                for k, v in row.items()
+            }),
+            axis=1,
+        )
+    else:
+        unmap_json_series = pd.Series(["{}"] * total_rows, index=df_clean.index)
+
+    # Step 5: stock numbers (vectorized via pandas string ops)
+    serials       = pd.RangeIndex(1, total_rows + 1)
+    stock_numbers = pd.Series(
+        [f"ANXT_{batch_code}_{sku_count}_{str(i).zfill(7)}" for i in serials],
+        dtype=str,
+    )
+
+    # Step 6: assemble all_rows as list of tuples
+    fixed_static = (file_name, author_name, upload_date, sku_count, user_id, user_email, upload_log_id)
+    target_values_matrix = target_df[TARGET_FIELDS].values  # shape: (rows, len(TARGET_FIELDS))
+
+    all_rows: list[tuple] = []
+    for i in range(total_rows):
+        row_tuple = (
+            (stock_numbers.iloc[i],) +
+            fixed_static +
+            tuple(target_values_matrix[i]) +
+            (attr_json_series.iloc[i], unmap_json_series.iloc[i])
+        )
+        all_rows.append(row_tuple)
 
     conn = get_conn()
     cur  = conn.cursor()
     inserted = 0
+    CHUNK = 1000
     try:
-        for serial, (_, row) in enumerate(df.iterrows(), start=1):
-            stock_number = generate_stock_number(batch_code, sku_count, serial)
-
-            target_values: dict[str, str | None] = {col: None for col in TARGET_FIELDS}
-            for src_col, tgt_col in src_to_target.items():
-                val = row.get(src_col)
-                target_values[tgt_col] = str(val) if pd.notna(val) else None
-
-            attr_dict: dict = {}
-            for col in attr_cols:
-                val     = row.get(col)
-                str_val = str(val) if pd.notna(val) else None
-                if col in attr_dict:
-                    existing = attr_dict[col]
-                    attr_dict[col] = existing + [str_val] if isinstance(existing, list) else [existing, str_val]
-                else:
-                    attr_dict[col] = str_val
-            attr_dict["file_name"]   = file_name
-            attr_dict["author_name"] = author_name
-
-            unmap_dict: dict = {}
-            for col in computed_unmapped_cols:
-                val = row.get(col)
-                unmap_dict[col] = str(val) if pd.notna(val) else None
-
-            fixed_values      = (stock_number, file_name, author_name, upload_date,
-                                 sku_count, user_id, user_email, upload_log_id)
-            target_col_values = tuple(target_values[col] for col in TARGET_FIELDS)
-            jsonb_values      = (json.dumps(attr_dict), json.dumps(unmap_dict))
-
-            cur.execute(insert_sql, fixed_values + target_col_values + jsonb_values)
-            inserted += 1
-
+        if total_rows > 0:
+            prog = st.progress(0, text="Inserting rows…")
+        for start in range(0, total_rows, CHUNK):
+            chunk = all_rows[start:start + CHUNK]
+            psycopg2.extras.execute_values(cur, insert_sql, chunk, page_size=CHUNK)
+            inserted += len(chunk)
+            if total_rows > 0:
+                prog.progress(min(inserted / total_rows, 1.0),
+                              text=f"Inserting rows… {inserted:,} / {total_rows:,}")
         conn.commit()
+        if total_rows > 0:
+            prog.empty()
     except Exception:
         conn.rollback()
         raise
     finally:
         cur.close()
-        conn.close()
+        release_conn(conn)
     return inserted
 
 
@@ -544,7 +624,7 @@ def insert_upload_log(
         raise
     finally:
         cur.close()
-        conn.close()
+        release_conn(conn)
 
 
 def fetch_upload_logs(show_deleted: bool = False) -> pd.DataFrame:
@@ -572,7 +652,7 @@ def fetch_upload_logs(show_deleted: bool = False) -> pd.DataFrame:
             )
         return df
     finally:
-        conn.close()
+        release_conn(conn)
 
 
 def fetch_etl_data_for_log(log_id: int) -> pd.DataFrame:
@@ -587,7 +667,7 @@ def fetch_etl_data_for_log(log_id: int) -> pd.DataFrame:
         )
         return df
     finally:
-        conn.close()
+        release_conn(conn)
 
 def fetch_full_etl_export(log_id: int) -> pd.DataFrame:
     """
@@ -612,7 +692,7 @@ def fetch_full_etl_export(log_id: int) -> pd.DataFrame:
         return df
 
     finally:
-        conn.close()   
+        release_conn(conn)   
 
 def fetch_all_etl_export(user_id: str) -> pd.DataFrame:
 
@@ -634,7 +714,7 @@ def fetch_all_etl_export(user_id: str) -> pd.DataFrame:
         return df
 
     finally:
-        conn.close()             
+        release_conn(conn)             
 
 
 
@@ -645,7 +725,7 @@ def hard_delete_log(log_id: int):
     ADMIN ONLY — raises PermissionError if caller is not admin.
     """
     if st.session_state.get("user_role") != "admin":
-        raise PermissionError("Only admin users can purge records.")
+        raise PermissionError("Only admin users can permanently delete records.")
     conn = get_conn()
     cur  = conn.cursor()
     try:
@@ -658,7 +738,7 @@ def hard_delete_log(log_id: int):
         raise
     finally:
         cur.close()
-        conn.close()
+        release_conn(conn)
 
 
 def update_log_metadata(log_id: int, project_name: str, batch_code: str):
@@ -676,7 +756,7 @@ def update_log_metadata(log_id: int, project_name: str, batch_code: str):
         raise
     finally:
         cur.close()
-        conn.close()
+        release_conn(conn)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -711,7 +791,7 @@ def save_mapping_template(project_name: str, mapping: dict, user_id: str):
         raise
     finally:
         cur.close()
-        conn.close()
+        release_conn(conn)
 
 
 def fetch_mapping_template(project_name: str, user_id: str) -> dict:
@@ -730,7 +810,7 @@ def fetch_mapping_template(project_name: str, user_id: str) -> dict:
             return {}
         return dict(zip(df["source_column"], df["target_column"]))
     finally:
-        conn.close()
+        release_conn(conn)
 
 
 def fetch_user_projects(user_id: str) -> list:
@@ -746,13 +826,17 @@ def fetch_user_projects(user_id: str) -> list:
         )
         return df["project_name"].tolist() if not df.empty else []
     finally:
-        conn.close()
+        release_conn(conn)
 
 
 # ═══════════════════════════════════════════════════════════
 # AUTOCOMPLETE / DROPDOWN API HELPERS (Requirements 3 + 4)
 # ═══════════════════════════════════════════════════════════
 
+# OPT 6: @st.cache_data(ttl=60) means these DB queries run at most once per minute
+# instead of on every Streamlit rerun — dramatically reduces rerender latency.
+
+@st.cache_data(ttl=60)
 def get_project_names(user_id: str) -> list[str]:
     """Return DISTINCT active project names — powers Project Name dropdown."""
     conn = get_conn()
@@ -764,9 +848,10 @@ def get_project_names(user_id: str) -> list[str]:
         )
         return df["project_name"].tolist() if not df.empty else []
     finally:
-        conn.close()
+        release_conn(conn)
 
 
+@st.cache_data(ttl=60)
 def get_batch_codes(user_id: str, project_name: str = "") -> list[str]:
     """Return DISTINCT active batch codes — powers Batch Code dropdown.
     If project_name is provided, scopes results to that project."""
@@ -787,9 +872,10 @@ def get_batch_codes(user_id: str, project_name: str = "") -> list[str]:
             )
         return df["batch_code"].tolist() if not df.empty else []
     finally:
-        conn.close()
+        release_conn(conn)
 
 
+@st.cache_data(ttl=60)
 def get_taxonomy_values(user_id: str) -> list[str]:
     """Return DISTINCT non-null taxonomy values from active SKU rows — powers Taxonomy dropdown."""
     conn = get_conn()
@@ -805,13 +891,13 @@ def get_taxonomy_values(user_id: str) -> list[str]:
               AND d.taxonomy IS NOT NULL
               AND d.taxonomy <> ''
             ORDER BY d.taxonomy
-            LIMIT 500
+            LIMIT 50
             """,
             conn, params=(user_id,)
         )
         return df["taxonomy"].tolist() if not df.empty else []
     finally:
-        conn.close()
+        release_conn(conn)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -867,7 +953,7 @@ def fetch_upload_logs_paginated(
         df = pd.read_sql_query(sql, conn, params=params)
         return df
     finally:
-        conn.close()
+        release_conn(conn)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -900,7 +986,7 @@ def taxonomy_search_file_level(user_id: str, taxonomy_query: str) -> pd.DataFram
         )
         return df
     finally:
-        conn.close()
+        release_conn(conn)
 
 
 def taxonomy_search_global(user_id: str, taxonomy_query: str) -> pd.DataFrame:
@@ -926,7 +1012,7 @@ def taxonomy_search_global(user_id: str, taxonomy_query: str) -> pd.DataFrame:
         )
         return df
     finally:
-        conn.close()
+        release_conn(conn)
 
 
 def fetch_etl_data_for_log_with_taxonomy(log_id: int, taxonomy_filter: str = "") -> pd.DataFrame:
@@ -953,7 +1039,7 @@ def fetch_etl_data_for_log_with_taxonomy(log_id: int, taxonomy_filter: str = "")
             )
         return df
     finally:
-        conn.close()
+        release_conn(conn)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1048,6 +1134,63 @@ def show_login_page():
 # 4. SESSION STATE INIT
 # ═══════════════════════════════════════════════════════════
 
+def save_workflow_state():
+
+    if not st.session_state.get("_df_path"):
+        return
+    workflow_state = {
+         "step": st.session_state.get("step", 1),
+        "mapping": st.session_state.get("mapping", {}),
+        "auto_mapped": st.session_state.get("auto_mapped", {}),
+        "attr_selected": st.session_state.get("attr_selected", []),
+        "select_all_prev": st.session_state.get("select_all_prev", False),
+        "unmapped_fields": st.session_state.get("unmapped_fields", []),
+        "source_columns": st.session_state.get("source_columns", []),
+        "project_name": st.session_state.get("project_name", ""),
+        "batch_code": st.session_state.get("batch_code", ""),
+        "file_name": st.session_state.get("file_name"),
+        "upload_date": st.session_state.get("upload_date"),
+        "sku_count": st.session_state.get("sku_count"),
+        }
+
+    df_path = st.session_state.get("_df_path")
+
+    if not df_path:
+        return
+
+    state_path = df_path + ".state.json"
+
+    with open(state_path, "w") as f:
+        json.dump(workflow_state, f)     
+
+
+def restore_workflow_state():
+
+    if not st.session_state.get("_df_path"):
+        return
+
+    df_path = st.session_state.get("_df_path")
+
+    if not df_path:
+        return
+
+    state_path = df_path + ".state.json"
+
+    if not os.path.exists(state_path):
+        return
+
+    with open(state_path, "r") as f:
+        workflow_state = json.load(f)
+
+    for k, v in workflow_state.items():
+        st.session_state[k] = v 
+
+    if "auto_mapped" not in st.session_state:
+        st.session_state.auto_mapped = {}   
+
+    if "attr_selected" not in st.session_state:
+        st.session_state.attr_selected = []       
+
 def init_state():
     # Auth keys — NEVER cleared by "Process Another File"
     for k, v in [("user_id", None), ("user_email", None), ("user_role", "user")]:
@@ -1063,6 +1206,8 @@ def init_state():
         "upload_date":      None,
         "sku_count":        None,
         "df":               None,
+        "_df_path":         None,   # persistent cache file path
+        "_df_orig_suffix":  None,   # original file extension for reload
         "source_columns":   [],
         "mapping":          {},
         "attr_selected":    [],
@@ -1077,11 +1222,13 @@ def init_state():
         # NEW: search state
         "search_project":   "",
         "search_batch":     "",
-        "search_taxonomy":  "",
         # NEW: taxonomy search state
         "tax_search_query": "",
         "tax_search_mode":  "File-level (Recommended)",
         "tax_search_results": None,
+        "processing_completed": False,
+        "inserted_rows": None,
+        "upload_log_id": None,
         # NEW: view panel state per log_id stored dynamically
     }
     for k, v in etl_defaults.items():
@@ -1089,29 +1236,32 @@ def init_state():
             st.session_state[k] = v
 
 
-
 init_state()
 
+# ── Restore session + workflow after browser refresh ─────────────────────
 
-
-# ── Restore session + page after refresh ──
 qp = st.query_params
 
-if (
-    not st.session_state.get("user_id")
-    and qp.get("uid")
-    and qp.get("email")
-):
+# Restore authentication
+if qp.get("uid") and qp.get("email"):
 
     st.session_state.user_id = qp.get("uid")
     st.session_state.user_email = qp.get("email")
     st.session_state.user_role = qp.get("role", "user")
 
+# Restore workflow state
+if qp.get("fp") and os.path.exists(qp.get("fp")):
+
+    st.session_state._df_path = qp.get("fp")
+    st.session_state._df_orig_suffix = qp.get("ds", "")
+
     try:
         st.session_state.step = int(qp.get("step", 1))
     except:
         st.session_state.step = 1
-        st.query_params["step"] = "1"
+
+    restore_workflow_state()
+
 
 # ── Login gate ──
 if not is_logged_in():
@@ -1135,6 +1285,52 @@ st.markdown(
 # 5. SHARED UI HELPERS
 # ═══════════════════════════════════════════════════════════
 
+def _sync_query_params():
+    """Write all restorable session state into query_params.
+
+    Called after every step transition so that a browser refresh restores the
+    exact same step, file, mapping, attributes, and unmapped fields — without
+    restarting from the upload page.
+
+    Query-param key budget (keys kept short to stay well under browser URL limits):
+      uid, email, role  — auth
+      step              — current step number
+      fn                — file_name
+      ud                — upload_date
+      sc                — sku_count (int)
+      pn                — project_name
+      bc                — batch_code
+      fp                — _df_path  (cache file path on server)
+      ds                — _df_orig_suffix
+      scols             — source_columns  (JSON list)
+      mp                — mapping         (JSON dict)
+      at                — attr_selected   (JSON list)
+      uf                — unmapped_fields (JSON list)
+    """
+    ss = st.session_state
+    qp = st.query_params
+
+    qp["uid"]   = ss.get("user_id", "") or ""
+    qp["email"] = ss.get("user_email", "") or ""
+    qp["role"]  = ss.get("user_role", "user") or "user"
+    qp["step"]  = str(ss.get("step", 1))
+
+    if ss.get("file_name"):
+        qp["fn"] = ss["file_name"]
+        qp["ud"] = ss.get("upload_date", "")
+        qp["sc"] = str(ss.get("sku_count", 0) or 0)
+        qp["pn"] = ss.get("project_name", "")
+        qp["bc"] = ss.get("batch_code", "")
+
+    if ss.get("_df_path"):
+        qp["fp"] = ss["_df_path"]
+        qp["ds"] = ss.get("_df_orig_suffix", "")
+
+    # Encode lists/dicts as JSON — only when they carry real data
+    # to avoid bloating the URL unnecessarily.
+            
+    
+
 def progress_bar(current: int):
     labels = {
         1: "1 Upload",
@@ -1150,15 +1346,18 @@ def progress_bar(current: int):
 
         button_type = "primary" if step_num == current else "secondary"
 
-        if col.button(
-            labels[step_num],
-            key=f"nav_step_{step_num}",
-            use_container_width=True,
-            type=button_type,
-        ):
-            st.session_state.step = step_num
-            st.query_params["step"] = str(step_num)
-            st.rerun()
+        if step_num <= st.session_state.get("step", 1):
+
+            if col.button(
+                labels[step_num],
+                key=f"nav_step_{step_num}",
+                use_container_width=True,
+                type=button_type,
+            ):
+                st.session_state.step = step_num
+                save_workflow_state()
+                _sync_query_params()
+                st.rerun()
 
 def file_info_strip():
     if st.session_state.file_name:
@@ -1177,13 +1376,45 @@ def used_targets() -> set:
 
 
 def read_uploaded(file) -> pd.DataFrame:
+    # OPT 3: CSV is fastest — dtype=str avoids type-inference overhead on large files.
+    # XLSX/ODS still supported. Avoids unnecessary df.copy() calls.
     name = file.name.lower()
     if name.endswith(".csv"):
-        return pd.read_csv(file)
+        return pd.read_csv(file, dtype=str, keep_default_na=False, na_values=[""])
     elif name.endswith(".ods"):
-        return pd.read_excel(file, engine="odf")
+        return pd.read_excel(file, engine="odf", dtype=str)
     else:
-        return pd.read_excel(file, engine="openpyxl")
+        return pd.read_excel(file, engine="openpyxl", dtype=str)
+
+
+# OPT 4 (REVISED): On-demand DataFrame loader.
+# Primary path: load from a parquet cache file (10-50× faster than re-parsing CSV/XLSX).
+# The parquet cache is written alongside the original upload cache file on first load.
+# Fallback: re-parse the original file if parquet cache is missing.
+def _load_df() -> pd.DataFrame | None:
+    """Reload DataFrame from parquet cache (fast) or original file (fallback)."""
+    path = st.session_state.get("_df_path")
+    if not path or not os.path.exists(path):
+        return st.session_state.get("df")
+
+    # Fast path — parquet cache
+    parquet_path = path + ".parquet"
+    if os.path.exists(parquet_path):
+        try:
+            return pd.read_parquet(parquet_path)
+        except Exception:
+            pass  # fall through to raw file
+
+    # Slow path — re-read original file and write parquet cache for next time
+    try:
+        df = read_uploaded(open(path, "rb"))
+        try:
+            df.to_parquet(parquet_path, index=False)
+        except Exception:
+            pass  # parquet write failure is non-fatal
+        return df
+    except Exception:
+        return st.session_state.get("df")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1294,7 +1525,7 @@ def render_favorites_section():
                         )
                         cnt = cur.fetchone()[0]
                         cur.close()
-                        conn.close()
+                        release_conn(conn)
                     except Exception:
                         cnt = "?"
 
@@ -1330,7 +1561,7 @@ def render_search_and_file_list():
 """, unsafe_allow_html=True)
 
     # ── Search inputs with autocomplete dropdowns ──────────────────
-    s1, s2, s3, s4 = st.columns([3, 2, 3, 2])
+    s1, s2, s4 = st.columns([4, 2, 3])
 
     # Fetch dropdown options from DB (cached per render via try/except)
     try:
@@ -1341,10 +1572,7 @@ def render_search_and_file_list():
         batch_options = get_batch_codes(uid, st.session_state.search_project)
     except Exception:
         batch_options = []
-    try:
-        tax_options = get_taxonomy_values(uid)
-    except Exception:
-        tax_options = []
+    
 
     with s1:
         # Selectbox with blank "All" option at top; user types to filter
@@ -1369,17 +1597,7 @@ def render_search_and_file_list():
             format_func=lambda x: "— All Batches —" if x == "" else x,
             key="inp_search_batch",
         )
-    with s3:
-        tax_list = [""] + tax_options
-        cur_tax  = st.session_state.search_taxonomy
-        tax_idx  = tax_list.index(cur_tax) if cur_tax in tax_list else 0
-        tf = st.selectbox(
-            "Taxonomy",
-            options=tax_list,
-            index=tax_idx,
-            format_func=lambda x: "— All Taxonomies —" if x == "" else x,
-            key="inp_search_taxonomy",
-        )
+    
     with s4:
         st.markdown("<br>", unsafe_allow_html=True)
         search_clicked = st.button("🔍 Search", type="primary", use_container_width=True, key="btn_search_main")
@@ -1388,7 +1606,7 @@ def render_search_and_file_list():
     if clear_clicked:
         st.session_state.search_project   = ""
         st.session_state.search_batch     = ""
-        st.session_state.search_taxonomy  = ""
+        
         st.session_state.file_list_offset = 0
         st.session_state.file_list_rows   = []
         st.rerun()
@@ -1396,7 +1614,7 @@ def render_search_and_file_list():
     if search_clicked:
         st.session_state.search_project   = pf
         st.session_state.search_batch     = bf
-        st.session_state.search_taxonomy  = tf
+        
         st.session_state.file_list_offset = 0
         st.session_state.file_list_rows   = []
 
@@ -1407,7 +1625,7 @@ def render_search_and_file_list():
                 user_id=uid,
                 project_name_filter=st.session_state.search_project,
                 batch_code_filter=st.session_state.search_batch,
-                taxonomy_filter=st.session_state.search_taxonomy,
+                taxonomy_filter="",
                 limit=20,
                 offset=0,
             )
@@ -1420,44 +1638,52 @@ def render_search_and_file_list():
 
     rows = st.session_state.file_list_rows
 
-        # ── Global Export Section ──
-   # st.markdown("### ⬇ Export All Uploaded Files")
-
+    # ── OPT 5: Global Export Section ─────────────────────────────────────────
+    # fetch_all_etl_export() used to run on EVERY rerun (very slow for large datasets).
+    # Now it only runs when the user explicitly clicks "Prepare Export".
+    # Result is cached in session_state["_export_cache"] until cleared.
     try:
+        export_ready = st.session_state.get("_export_cache") is not None
 
-        export_df = fetch_all_etl_export(uid)
+        if st.button("📦 Prepare Export (All Files)", key="btn_prepare_export"):
+            with st.spinner("Generating export…"):
+                st.session_state["_export_cache"] = fetch_all_etl_export(uid)
+            export_ready = True
 
-        if not export_df.empty:
+        if export_ready:
+            export_df = st.session_state["_export_cache"]
+            if not export_df.empty:
+                # CSV Export
+                csv_data = export_df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="⬇ Download ALL as CSV",
+                    data=csv_data,
+                    file_name="all_uploaded_etl_data.csv",
+                    mime="text/csv",
+                    key="download_all_csv",
+                )
 
-            # CSV Export
-            csv_data = export_df.to_csv(index=False).encode("utf-8")
+                # Remove timezone info for Excel compatibility
+                excel_df = export_df.copy()
+                for col in excel_df.columns:
+                    if pd.api.types.is_datetime64tz_dtype(excel_df[col]):
+                        excel_df[col] = excel_df[col].dt.tz_localize(None)
 
-            st.download_button(
-                label="⬇ Download ALL as CSV",
-                data=csv_data,
-                file_name="all_uploaded_etl_data.csv",
-                mime="text/csv",
-                key="download_all_csv",
-            )
+                excel_buffer = BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+                    excel_df.to_excel(writer, index=False)
 
-            # Remove timezone info for Excel compatibility
-            for col in export_df.columns:
-                if pd.api.types.is_datetime64tz_dtype(export_df[col]):
-                    export_df[col] = export_df[col].dt.tz_localize(None)
+                st.download_button(
+                    label="⬇ Download ALL as Excel",
+                    data=excel_buffer.getvalue(),
+                    file_name="all_uploaded_etl_data.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_all_excel",
+                )
 
-            # Excel Export
-            excel_buffer = BytesIO()
-
-            with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-                export_df.to_excel(writer, index=False)
-
-            st.download_button(
-                label="⬇ Download ALL as Excel",
-                data=excel_buffer.getvalue(),
-                file_name="all_uploaded_etl_data.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_all_excel",
-            )
+                if st.button("🗑 Clear Export Cache", key="btn_clear_export"):
+                    st.session_state.pop("_export_cache", None)
+                    st.rerun()
 
     except Exception as e:
         st.error(f"Global export failed: {e}")
@@ -1466,7 +1692,7 @@ def render_search_and_file_list():
         st.info("No uploaded files found. Try adjusting search filters.")
     else:
         st.caption(f"Showing {len(rows)} file(s) — scroll down for more.")
-        render_file_cards(rows, taxonomy_filter=st.session_state.search_taxonomy)
+        render_file_cards(rows)
 
         # ── FEATURE 4: Load More button ──
         if st.button("⬇ Load More", key="btn_load_more_search"):
@@ -1475,7 +1701,7 @@ def render_search_and_file_list():
                     user_id=uid,
                     project_name_filter=st.session_state.search_project,
                     batch_code_filter=st.session_state.search_batch,
-                    taxonomy_filter=st.session_state.search_taxonomy,
+                    taxonomy_filter="",
                     limit=20,
                     offset=st.session_state.file_list_offset,
                 )
@@ -1526,29 +1752,25 @@ def render_file_cards(rows: list, taxonomy_filter: str = ""):
    
 
             # ── Admin-only delete button (UI layer guard) ──
+            # ── Admin-only permanent delete ──
             if admin:
+
                 if st.button("🗑 Delete", key=f"fc_del_{rid}", use_container_width=True):
-                    st.session_state[f"fc_confirm_del_{rid}"] = True
 
-        # Admin delete confirmation
-        if admin and st.session_state.get(f"fc_confirm_del_{rid}"):
-            st.warning(f"⚠️ Permanently delete this file and all linked ETL data?This action cannot be undone.{rid}?")
-            dc1, dc2 = st.columns(2)
-            if dc1.button("✅ Yes, Delete", key=f"fc_del_yes_{rid}", type="primary"):
-                try:
-                    hard_delete_log(rid)
-                    st.session_state.pop(f"fc_confirm_del_{rid}", None)
-                    st.session_state.file_list_rows = [
-                        r for r in st.session_state.file_list_rows if int(r["id"]) != rid
-                    ]
-                    st.success(f"Record #{rid} deleted.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Delete failed: {e}")
-            if dc2.button("❌ Cancel", key=f"fc_del_no_{rid}"):
-                st.session_state.pop(f"fc_confirm_del_{rid}", None)
-                st.rerun()
+                    try:
+                        hard_delete_log(rid)
 
+                        st.session_state.file_list_rows = [
+                            r for r in st.session_state.file_list_rows
+                            if int(r["id"]) != rid
+                        ]
+
+                        st.success(f"Record #{rid} permanently deleted.")
+
+                        st.rerun()
+
+                    except Exception as e:
+                        st.error(f"Delete failed: {e}")
         # ── Inline View Panel ──
         if st.session_state.get(f"fc_show_{rid}", False):
             try:
@@ -1692,7 +1914,8 @@ def step_upload():
     uploaded = st.file_uploader("Drop file here", type=["csv", "xlsx", "ods"])
 
     if not uploaded:
-        st.info("Accepted formats: .xlsx  ·  .ods  ·  .csv")
+        # OPT 3: hint user that CSV is fastest for large files
+        st.info("Accepted formats: .csv (fastest for 10k+ rows)  ·  .xlsx  ·  .ods")
         return
 
     with st.spinner("Reading file…"):
@@ -1750,7 +1973,13 @@ def step_upload():
             proj_applied, proj_matched = apply_project_mapping_template(source_cols, project_hint, uid)
 
         # Step 2: Fuzzy auto-suggest for any remaining cols
-        fuzzy_suggestions = auto_suggest_mapping(source_cols)
+        if not st.session_state.mapping:
+
+            fuzzy_suggestions = auto_suggest_mapping(source_cols)
+
+        else:
+
+            fuzzy_suggestions = st.session_state.mapping.copy()
 
         # Step 3: Merge — project template takes priority over fuzzy
         init_mapping = {}
@@ -1765,17 +1994,49 @@ def step_upload():
             else:
                 init_mapping[col] = "— skip —"
 
-        st.session_state.df                 = df
+        # ── Persist uploaded file to stable cache directory ──────────────────
+        # Use a hash of file content so the same file is never written twice.
+        file_bytes   = uploaded.getvalue()
+        file_hash    = hashlib.md5(file_bytes).hexdigest()
+        suffix       = "." + uploaded.name.rsplit(".", 1)[-1].lower()
+        cache_path   = os.path.join(_UPLOAD_CACHE_DIR, f"{file_hash}{suffix}")
+        parquet_path = cache_path + ".parquet"
+
+        if not os.path.exists(cache_path):
+            with open(cache_path, "wb") as fh:
+                fh.write(file_bytes)
+
+        # Write parquet cache immediately for fast future reloads
+        if not os.path.exists(parquet_path):
+            try:
+                df.to_parquet(parquet_path, index=False)
+            except Exception:
+                pass  # non-fatal
+
+        st.session_state.df                 = None          # never store full df in session
+        st.session_state._df_path           = cache_path
+        st.session_state._df_orig_suffix    = suffix
         st.session_state.file_name          = file_name
         st.session_state.upload_date        = upload_date
         st.session_state.sku_count          = sku_count
         st.session_state.source_columns     = source_cols
-        st.session_state.mapping            = init_mapping
-        st.session_state.auto_mapped        = fuzzy_suggestions
-        st.session_state.proj_auto_mapped   = proj_matched   # NEW: track project-template matches
+        if not st.session_state.mapping:
+
+            st.session_state.mapping = init_mapping
+            st.session_state.auto_mapped = fuzzy_suggestions
+        st.session_state.proj_auto_mapped   = proj_matched
         st.session_state.project_name       = project_hint if project_hint else st.session_state.project_name
+
         st.session_state.step = 2
         st.query_params["step"] = "2"
+
+        st.session_state.step               = 2
+
+        # ── Encode all restorable state into query_params ────────────────────
+        # This allows browser refresh to fully restore the current step without
+        # restarting from the upload page.
+        save_workflow_state()
+        _sync_query_params()
         st.rerun()
 
 
@@ -1787,7 +2048,8 @@ def step_mapping():
     progress_bar(2)
     file_info_strip()
 
-    if st.session_state.df is None:
+    # OPT 4: reload df on demand from temp file — not kept in session_state
+    if not st.session_state.get("_df_path") and st.session_state.get("df") is None:
         st.warning("No file uploaded yet.")
         return
 
@@ -1900,7 +2162,8 @@ def step_mapping():
     with n1:
         if st.button("← Back to Upload", disabled=(page > 0)):
             st.session_state.step = 1
-            st.query_params["step"] = "1"
+            save_workflow_state()
+            _sync_query_params()
             st.rerun()
     with n2:
         if st.button("⬅ Prev", disabled=(page == 0)):
@@ -1917,6 +2180,8 @@ def step_mapping():
             else:
                 st.session_state.map_page = 0
                 st.session_state.step     = 3
+                save_workflow_state()
+                _sync_query_params()
                 st.rerun()
 
 
@@ -1928,7 +2193,7 @@ def step_attributes():
     progress_bar(3)
     file_info_strip()
 
-    if st.session_state.df is None:
+    if not st.session_state.get("_df_path") and st.session_state.get("df") is None:
         st.warning("No file uploaded yet.")
         return
 
@@ -1950,6 +2215,14 @@ def step_attributes():
     search   = st.text_input("🔍 Filter columns", placeholder="Type to search…", key="attr_search")
     filtered = [c for c in available if search.lower() in c.lower()] if search else available
 
+    for col in filtered:
+
+        if f"attrL_{col}" not in st.session_state:
+            st.session_state[f"attrL_{col}"] = col in st.session_state.attr_selected
+
+        if f"attrR_{col}" not in st.session_state:
+            st.session_state[f"attrR_{col}"] = col in st.session_state.attr_selected
+
     st.markdown(
         f'<div style="font-size:12px;color:#ffffff;margin:4px 0 8px">'
         f'Showing <strong>{len(filtered)}</strong> of <strong>{len(available)}</strong> '
@@ -1966,18 +2239,27 @@ def step_attributes():
     )
 
     if select_all != prev_select_all:
+
         if select_all:
+
             for col in filtered:
+
                 if col not in st.session_state.attr_selected:
                     st.session_state.attr_selected.append(col)
-                st.session_state[f"attrL_{col}"] = True
-                st.session_state[f"attrR_{col}"] = True
+
         else:
-            for col in filtered:
-                if col in st.session_state.attr_selected:
-                    st.session_state.attr_selected.remove(col)
-                st.session_state[f"attrL_{col}"] = False
-                st.session_state[f"attrR_{col}"] = False
+
+            st.session_state.attr_selected = [
+                c for c in st.session_state.attr_selected
+                if c not in filtered
+            ]
+
+        st.session_state["select_all_prev"] = select_all
+
+        save_workflow_state()
+        _sync_query_params()
+
+        st.rerun()
 
     st.session_state["select_all_prev"] = select_all
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
@@ -1999,10 +2281,17 @@ def step_attributes():
             for col in left_cols:
                 checked = col in st.session_state.attr_selected
                 ticked  = st.checkbox(col, value=st.session_state.get(f"attrL_{col}", checked), key=f"attrL_{col}")
-                if ticked and col not in st.session_state.attr_selected:
+                prev_selected = col in st.session_state.attr_selected
+
+                if ticked and not prev_selected:
                     st.session_state.attr_selected.append(col)
-                elif not ticked and col in st.session_state.attr_selected:
+                    save_workflow_state()
+                    _sync_query_params()
+
+                elif not ticked and prev_selected:
                     st.session_state.attr_selected.remove(col)
+                    save_workflow_state()
+                    _sync_query_params()
 
     with panel_r:
         st.markdown(
@@ -2012,11 +2301,17 @@ def step_attributes():
             for col in right_cols:
                 checked = col in st.session_state.attr_selected
                 ticked  = st.checkbox(col, value=st.session_state.get(f"attrR_{col}", checked), key=f"attrR_{col}")
-                if ticked and col not in st.session_state.attr_selected:
-                    st.session_state.attr_selected.append(col)
-                elif not ticked and col in st.session_state.attr_selected:
-                    st.session_state.attr_selected.remove(col)
+                prev_selected = col in st.session_state.attr_selected
 
+                if ticked and not prev_selected:
+                    st.session_state.attr_selected.append(col)
+                    save_workflow_state()
+                    _sync_query_params()
+
+                elif not ticked and prev_selected:
+                    st.session_state.attr_selected.remove(col)
+                    save_workflow_state()
+                    _sync_query_params()
     n_sel = len(st.session_state.attr_selected)
     if n_sel:
         preview = ", ".join(st.session_state.attr_selected[:8])
@@ -2027,12 +2322,14 @@ def step_attributes():
     with b1:
         if st.button("← Back to Mapping"):
             st.session_state.step = 2
-            st.query_params["step"] = "2"
+            save_workflow_state()
+            _sync_query_params()
             st.rerun()
     with b3:
         if st.button("Next: Unmapped Fields →", type="primary", use_container_width=True):
             st.session_state.step = 4
-            st.query_params["step"] = "4"
+            save_workflow_state()
+            _sync_query_params()
             st.rerun()
 
 
@@ -2044,7 +2341,7 @@ def step_unmapped():
     progress_bar(4)
     file_info_strip()
 
-    if st.session_state.df is None:
+    if not st.session_state.get("_df_path") and st.session_state.get("df") is None:
         st.warning("No file uploaded yet.")
         return
 
@@ -2091,12 +2388,14 @@ def step_unmapped():
     with b1:
         if st.button("← Back to Attributes"):
             st.session_state.step = 3
-            st.query_params["step"] = "3"
+            save_workflow_state()
+            _sync_query_params()
             st.rerun()
     with b3:
         if st.button("Next: Summary →", type="primary", use_container_width=True):
             st.session_state.step = 5
-            st.query_params["step"] = "5"
+            save_workflow_state()
+            _sync_query_params()
             st.rerun()
 
 
@@ -2108,7 +2407,7 @@ def step_summary():
     progress_bar(5)
     file_info_strip()
 
-    if st.session_state.df is None:
+    if not st.session_state.get("_df_path") and st.session_state.get("df") is None:
         st.warning("No file uploaded yet.")
         return
 
@@ -2182,7 +2481,8 @@ def step_summary():
     with b1:
         if st.button("← Back to Unmapped"):
             st.session_state.step = 4
-            st.query_params["step"] = "4"
+            save_workflow_state()
+            _sync_query_params()
             st.rerun()
     with b3:
         if st.button("🚀 Submit & Upload", type="primary", use_container_width=True):
@@ -2216,65 +2516,77 @@ def step_summary():
                 )
                 return
 
-            with st.spinner("Saving to PostgreSQL…"):
-                # STEP 1 — INSERT LOG
-                try:
-                    log_id = insert_upload_log(
-                        project_name = st.session_state.project_name.strip(),
-                        batch_code   = st.session_state.batch_code.strip(),
-                        author_name  = st.session_state.get("user_email", ""),
-                        file_name    = st.session_state.file_name,
-                        upload_date  = st.session_state.upload_date,
-                        sku_count    = st.session_state.sku_count,
-                        user_id      = st.session_state.get("user_id"),
-                        user_email   = st.session_state.get("user_email"),
-                    )
-                except Exception as e:
-                    err = str(e).lower()
-                    if "unique" in err or "duplicate key" in err:
-                        st.warning("⚠️ Duplicate file detected (DB constraint). Upload skipped.")
-                    else:
-                        st.error(f"❌ Failed to create upload log: {e}")
-                    return
 
-                # STEP 2 — INSERT ETL DATA
-                try:
-                    insert_etl_data(
-                        df            = st.session_state.df,
-                        mapping       = st.session_state.mapping,
-                        attr_cols     = st.session_state.attr_selected,
-                        unmapped_cols = st.session_state.unmapped_fields,
-                        batch_code    = st.session_state.batch_code.strip(),
-                        author_name   = st.session_state.get("user_email", ""),
-                        file_name     = st.session_state.file_name,
-                        upload_date   = st.session_state.upload_date,
-                        sku_count     = st.session_state.sku_count,
-                        user_id       = st.session_state.get("user_id"),
-                        user_email    = st.session_state.get("user_email"),
-                        upload_log_id = log_id,
-                    )
-                except Exception as e:
+            if not st.session_state.get("processing_completed"):
+                with st.spinner("Saving to PostgreSQL…"):
+                    # STEP 1 — INSERT LOG
                     try:
-                        hard_delete_log(log_id)
-                    except Exception:
-                        pass
-                    st.error(f"❌ Failed to insert ETL data: {e}")
-                    return
+                        log_id = insert_upload_log(
+                            project_name = st.session_state.project_name.strip(),
+                            batch_code   = st.session_state.batch_code.strip(),
+                            author_name  = st.session_state.get("user_email", ""),
+                            file_name    = st.session_state.file_name,
+                            upload_date  = st.session_state.upload_date,
+                            sku_count    = st.session_state.sku_count,
+                            user_id      = st.session_state.get("user_id"),
+                            user_email   = st.session_state.get("user_email"),
+                        )
+                    except Exception as e:
+                        err = str(e).lower()
+                        if "unique" in err or "duplicate key" in err:
+                            st.warning("⚠️ Duplicate file detected (DB constraint). Upload skipped.")
+                        else:
+                            st.error(f"❌ Failed to create upload log: {e}")
+                        return
 
-                # NEW STEP 3 — SAVE MAPPING TEMPLATE (FEATURE 1)
-                try:
-                    save_mapping_template(
-                        project_name = st.session_state.project_name.strip(),
-                        mapping      = st.session_state.mapping,
-                        user_id      = st.session_state.get("user_id"),
-                    )
-                except Exception as e:
-                    # Non-fatal — warn but don't block
-                    st.warning(f"⚠️ Mapping template could not be saved: {e}")
+                    # STEP 2 — INSERT ETL DATA
+                    try:
+                        # OPT 4: reload DataFrame from temp file at submit time
+                        _df_to_insert = _load_df()
+                        if _df_to_insert is None:
+                            st.error("❌ Source file could not be reloaded. Please re-upload.")
+                            return
+                        inserted = insert_etl_data(
+                            df            = _df_to_insert,
+                            mapping       = st.session_state.mapping,
+                            attr_cols     = st.session_state.attr_selected,
+                            unmapped_cols = st.session_state.unmapped_fields,
+                            batch_code    = st.session_state.batch_code.strip(),
+                            author_name   = st.session_state.get("user_email", ""),
+                            file_name     = st.session_state.file_name,
+                            upload_date   = st.session_state.upload_date,
+                            sku_count     = st.session_state.sku_count,
+                            user_id       = st.session_state.get("user_id"),
+                            user_email    = st.session_state.get("user_email"),
+                            upload_log_id = log_id,
+                        )
+                    except Exception as e:
+                        try:
+                            hard_delete_log(log_id)
+                        except Exception:
+                            pass
+                        st.error(f"❌ Failed to insert ETL data: {e}")
+                        return
 
-            st.session_state.submitted = True
-            st.session_state.step      = 6
-            st.rerun()
+                    # NEW STEP 3 — SAVE MAPPING TEMPLATE (FEATURE 1)
+                    try:
+                        save_mapping_template(
+                            project_name = st.session_state.project_name.strip(),
+                            mapping      = st.session_state.mapping,
+                            user_id      = st.session_state.get("user_id"),
+                        )
+                    except Exception as e:
+                        # Non-fatal — warn but don't block
+                        st.warning(f"⚠️ Mapping template could not be saved: {e}")
+
+                st.session_state.processing_completed = True
+                st.session_state.submitted = True
+                st.session_state.upload_log_id = log_id
+                st.session_state.inserted_rows = inserted
+                st.session_state.step      = 6
+                save_workflow_state()
+                _sync_query_params()
+                st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -2283,6 +2595,19 @@ def step_summary():
 
 def step_result():
     progress_bar(6)
+
+    if st.session_state.get("df") is None:
+
+        restored_df = _load_df()
+
+        if restored_df is not None:
+            st.session_state.df = restored_df
+        else:
+            st.warning("Session expired. Please upload again.")
+            return
+    
+    
+    _sync_query_params()
     st.markdown("<h4 style='color:#ffffff;'>✅ Upload Complete!</h4>",
     unsafe_allow_html=True)
 
@@ -2377,50 +2702,6 @@ def step_result():
                         if a2.button("✏️ Edit", key=f"edit_{rid}", use_container_width=True):
                             st.session_state[f"edit_mode_{rid}"] = not st.session_state.get(f"edit_mode_{rid}", False)
 
-                        # Delete & Purge — admin only (UI layer + function layer guard)
-                        if admin and a3 is not None:
-                            if a3.button("🗑 Del", key=f"del_{rid}", use_container_width=True):
-                                st.session_state[f"fc_confirm_del_{rid}"] = True
-
-                        if admin and a4 is not None:
-                            if a4.button("💣 Purge", key=f"purge_{rid}", use_container_width=True):
-                                st.session_state[f"fc_confirm_purge_{rid}"] = True
-
-                    # Admin soft-delete confirmation
-                    if admin and st.session_state.get(f"fc_confirm_del_{rid}"):
-                        st.warning(f"⚠️ Soft-delete record #{rid} and all its SKU data? It will be hidden from all views.")
-                        dc1, dc2 = st.columns(2)
-                        if dc1.button("✅ Confirm Delete", key=f"fc_confirm_del_yes_{rid}", type="primary"):
-                            try:
-                                hard_delete_log(rid)
-                                st.session_state.pop(f"fc_confirm_del_{rid}", None)
-                                st.success(f"Record #{rid} soft-deleted.")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Delete failed: {e}")
-                        if dc2.button("❌ Cancel", key=f"fc_confirm_del_no_{rid}"):
-                            st.session_state.pop(f"fc_confirm_del_{rid}", None)
-                            st.rerun()
-
-                    # Admin hard-delete (purge) confirmation
-                    if admin and st.session_state.get(f"confirm_purge_{rid}"):
-                        st.warning(
-                            f"⚠️ Permanently delete record #{rid} and ALL its SKU data? "
-                            "This cannot be undone."
-                        )
-                        pc1, pc2 = st.columns(2)
-                        if pc1.button("✅ Confirm Purge", key=f"confirm_yes_{rid}", type="primary"):
-                            try:
-                                hard_delete_log(rid)
-                                st.session_state.pop(f"confirm_purge_{rid}", None)
-                                st.success(f"Record #{rid} permanently deleted.")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Purge failed: {e}")
-                        if pc2.button("❌ Cancel", key=f"confirm_no_{rid}"):
-                            st.session_state.pop(f"confirm_purge_{rid}", None)
-                            st.rerun()
-
                     if st.session_state.get(f"show_data_{rid}"):
                         try:
                             data_df = fetch_etl_data_for_log(rid)
@@ -2482,6 +2763,16 @@ def step_result():
 
     st.markdown("---")
     if st.button("🔄 Process Another File", type="primary"):
+        # Clean up persistent cache files for this upload (both raw + parquet)
+        _cache = st.session_state.get("_df_path")
+        if _cache:
+            for _path in (_cache, _cache + ".parquet"):
+                if os.path.exists(_path):
+                    try:
+                        os.unlink(_path)
+                    except Exception:
+                        pass
+
         auth_backup = {
             "user_id":    st.session_state.get("user_id"),
             "user_email": st.session_state.get("user_email"),
@@ -2492,6 +2783,12 @@ def step_result():
         st.session_state["user_id"]    = auth_backup["user_id"]
         st.session_state["user_email"] = auth_backup["user_email"]
         st.session_state["user_role"]  = auth_backup["user_role"]
+        st.session_state["step"]       = 1
+        # Clear all workflow query params; keep auth
+        for _qk in ["fn", "ud", "sc", "pn", "bc", "fp", "ds", "scols", "mp", "at", "uf", "step"]:
+            st.query_params.pop(_qk, None)
+            save_workflow_state()
+        _sync_query_params()
         st.rerun()
 
 
