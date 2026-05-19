@@ -2155,11 +2155,23 @@ def step_mapping():
     )
     # --- CHANGE END ---
 
-    n_pages   = max(1, (total + ROWS_PER_MAP_PAGE - 1) // ROWS_PER_MAP_PAGE)
-    page      = st.session_state.map_page
-    page_cols = sorted_cols[page * ROWS_PER_MAP_PAGE : (page + 1) * ROWS_PER_MAP_PAGE]
+    # ── Reversed UI: paginate over TARGET_FIELDS instead of source columns ──────
+    # Only show target fields that are either already mapped or not yet taken
+    # (i.e. all TARGET_FIELDS — user assigns a source to each via dropdown).
+    # Pagination still uses ROWS_PER_MAP_PAGE; total is now len(TARGET_FIELDS).
+    total_targets = len(TARGET_FIELDS)
+    n_pages       = max(1, (total_targets + ROWS_PER_MAP_PAGE - 1) // ROWS_PER_MAP_PAGE)
+    page          = st.session_state.map_page
+    page_targets  = TARGET_FIELDS[page * ROWS_PER_MAP_PAGE : (page + 1) * ROWS_PER_MAP_PAGE]
 
-    # summary bar
+    # Build reverse lookup: target_field -> source_col  (from current mapping dict)
+    target_to_source: dict[str, str] = {
+        tgt: src
+        for src, tgt in st.session_state.mapping.items()
+        if tgt != "— skip —"
+    }
+
+    # summary bar (computed from existing mapping dict — unchanged backend format)
     auto_count   = sum(1 for c in source_cols if auto_mapped.get(c) and st.session_state.mapping.get(c) == auto_mapped.get(c))
     proj_count   = sum(1 for c in source_cols if proj_matched.get(c) and st.session_state.mapping.get(c) == proj_matched.get(c))
     mapped_count = sum(1 for v in st.session_state.mapping.values() if v != "— skip —")
@@ -2167,70 +2179,90 @@ def step_mapping():
         f"📂 **{proj_count}** project-template mapped  ·  "
         f"🤖 **{auto_count}** name-matched  ·  "
         f"✅ **{mapped_count}** total mapped  ·  "
-        f"⏭ **{total - mapped_count}** skipped",
+        f"⏭ **{total - mapped_count}** source(s) skipped",
         icon=None,
     )
 
-    h_src, h_arrow, h_tgt = st.columns([5, 1, 5])
-    h_src.markdown(
-        '<div class="panel-header" style="background:#f0f4ff;border-radius:6px;padding:8px 12px">'
-        '⬤ SOURCE FIELDS</div>', unsafe_allow_html=True)
-    h_arrow.markdown("")
+    h_tgt, h_arrow, h_src = st.columns([5, 1, 5])
     h_tgt.markdown(
         '<div class="panel-header" style="background:#f0fdf4;border-radius:6px;padding:8px 12px">'
         '⬤ TARGET FIELDS</div>', unsafe_allow_html=True)
+    h_arrow.markdown("")
+    h_src.markdown(
+        '<div class="panel-header" style="background:#f0f4ff;border-radius:6px;padding:8px 12px">'
+        '⬤ SOURCE FIELDS</div>', unsafe_allow_html=True)
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-    for src in page_cols:
-        current_val = st.session_state.mapping.get(src, "— skip —")
-        taken       = used_targets()
-        options     = ["— skip —"] + [
-            t for t in TARGET_FIELDS if t not in taken or t == current_val
-        ]
-        is_auto      = (auto_mapped.get(src) == current_val and current_val != "— skip —")
-        is_proj_auto = (proj_matched.get(src) == current_val and current_val != "— skip —")
+    for tgt in page_targets:
+        # Which source is currently mapped to this target (if any)?
+        current_src = target_to_source.get(tgt, "— skip —")
 
-        col_src, col_arrow, col_tgt = st.columns([5, 1, 5])
-        with col_src:
+        # Build source options: skip + all source cols not already used by another target,
+        # but always include the currently selected source for this row.
+        used_sources = {
+            src for src, t in st.session_state.mapping.items()
+            if t != "— skip —" and t != tgt          # exclude current target's own source
+        }
+        source_options = ["— skip —"] + [
+            c for c in source_cols
+            if c not in used_sources or c == current_src
+        ]
+
+        # Badge detection: was this target auto-mapped or project-mapped?
+        is_auto      = (current_src != "— skip —" and auto_mapped.get(current_src) == tgt)
+        is_proj_auto = (current_src != "— skip —" and proj_matched.get(current_src) == tgt)
+
+        col_tgt, col_arrow, col_src_dd = st.columns([5, 1, 5])
+        with col_tgt:
             badges = ""
             if is_proj_auto:
                 badges += '<span class="proj-auto-badge">📂 PROJECT</span>'
             elif is_auto:
                 badges += '<span class="auto-badge">🤖 AUTO</span>'
             st.markdown(
-                f'<div style="padding:4px 0"><span class="source-tag">📌 {src}</span>{badges}</div>',
+                f'<div style="padding:4px 0"><span class="source-tag">🎯 {tgt}</span>{badges}</div>',
                 unsafe_allow_html=True)
         with col_arrow:
-            st.markdown('<div class="arrow-cell">→</div>', unsafe_allow_html=True)
-        with col_tgt:
-            idx    = options.index(current_val) if current_val in options else 0
-            chosen = st.selectbox(
-                label=src, options=options, index=idx,
-                key=f"map_{src}", label_visibility="collapsed")
-            st.session_state.mapping[src] = chosen
+            st.markdown('<div class="arrow-cell">←</div>', unsafe_allow_html=True)
+        with col_src_dd:
+            idx        = source_options.index(current_src) if current_src in source_options else 0
+            chosen_src = st.selectbox(
+                label=tgt, options=source_options, index=idx,
+                key=f"map_tgt_{tgt}", label_visibility="collapsed")
+
+            # ── Update mapping[source] = target (backend format preserved) ──────
+            # 1. Remove old mapping entry for this target if source changed
+            if current_src != "— skip —" and chosen_src != current_src:
+                st.session_state.mapping[current_src] = "— skip —"
+            # 2. Write new mapping entry
+            if chosen_src != "— skip —":
+                st.session_state.mapping[chosen_src] = tgt
         st.markdown('<div style="margin-bottom:2px"></div>', unsafe_allow_html=True)
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
     st.caption(
         f"Page {page + 1} of {n_pages}  ·  "
         f"{mapped_count} field(s) mapped  ·  "
-        f"{total - mapped_count} skipped"
+        f"{total - mapped_count} source(s) skipped"
     )
 
     # =========================================================
     # PERSIST CURRENT SELECTBOX VALUES
     # =========================================================
     def persist_mapping_state():
-
-        for col in st.session_state.source_columns:
-
-            map_key = f"map_{col}"
-
+        # Reversed UI: selectbox key is map_tgt_{target}, value is chosen source col.
+        # Rebuild mapping as {source: target} for full backend compatibility.
+        for tgt in TARGET_FIELDS:
+            map_key = f"map_tgt_{tgt}"
             if map_key in st.session_state:
-
-                st.session_state.mapping[col] = (
-                    st.session_state[map_key]
-                )
+                chosen_src = st.session_state[map_key]
+                # Clear any existing source→target entry that pointed to this target
+                for src in list(st.session_state.mapping.keys()):
+                    if st.session_state.mapping.get(src) == tgt:
+                        st.session_state.mapping[src] = "— skip —"
+                # Write new entry
+                if chosen_src != "— skip —":
+                    st.session_state.mapping[chosen_src] = tgt
 
     # =========================================================
     # NAVIGATION BUTTONS
