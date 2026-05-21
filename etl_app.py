@@ -1209,6 +1209,7 @@ def init_state():
         "_df_path":         None,   # persistent cache file path
         "_df_orig_suffix":  None,   # original file extension for reload
         "source_columns":   [],
+        "attribute_columns": [],
         "mapping":          {},
         "attr_selected":    [],
         "unmapped_fields":  [],
@@ -1948,6 +1949,56 @@ def render_taxonomy_search_section():
                 st.dataframe(results, use_container_width=True, hide_index=True)
 
 
+
+
+# =========================================================
+# ATTRIBUTE SECTION SPLITTER
+# =========================================================
+
+def split_primary_and_attribute_columns(all_columns):
+
+    attr_start_idx = None
+
+    for idx, col in enumerate(all_columns):
+
+        col_clean = (
+            str(col)
+            .strip()
+            .lower()
+        )
+
+        # attribute section starts here
+        if (
+            col_clean.startswith("att")
+            or col_clean.startswith("attr")
+            or col_clean.startswith("attribute")
+        ):
+
+            attr_start_idx = idx
+            break
+
+    # -----------------------------------------------------
+    # NO ATTRIBUTE SECTION
+    # -----------------------------------------------------
+
+    if attr_start_idx is None:
+
+        primary_columns = all_columns
+        attribute_columns = []
+
+    # -----------------------------------------------------
+    # SPLIT FROM FIRST ATTRIBUTE COLUMN
+    # -----------------------------------------------------
+
+    else:
+
+        primary_columns = all_columns[:attr_start_idx]
+
+        attribute_columns = all_columns[attr_start_idx:]
+
+    return primary_columns, attribute_columns                
+
+
 # ═══════════════════════════════════════════════════════════
 # 6. STEP 1 — FILE UPLOAD (MODIFIED — adds project mapping suggestion)
 # ═══════════════════════════════════════════════════════════
@@ -2074,7 +2125,26 @@ def step_upload():
         st.session_state.file_name          = file_name
         st.session_state.upload_date        = upload_date
         st.session_state.sku_count          = sku_count
-        st.session_state.source_columns     = source_cols
+        # =========================================================
+        # SPLIT COLUMNS
+        # =========================================================
+
+        all_columns = list(source_cols)
+
+        primary_columns, attribute_columns = (
+            split_primary_and_attribute_columns(all_columns)
+        )
+
+        # =========================================================
+        # SAVE SESSION STATE
+        # =========================================================
+
+        st.session_state.source_columns = primary_columns
+
+        st.session_state.attribute_columns = attribute_columns
+
+        # all attribute cols selected by default
+        st.session_state.attr_selected = attribute_columns.copy()
         if not st.session_state.mapping:
 
             st.session_state.mapping = init_mapping
@@ -2137,7 +2207,10 @@ def step_mapping():
             "🤖 = auto-suggested. Override any mapping using the dropdown."
         )
 
-    source_cols = st.session_state.source_columns
+    source_cols = st.session_state.get(
+        "source_columns",
+        []
+    )
     total       = len(source_cols)
     auto_mapped = st.session_state.get("auto_mapped", {})
 
@@ -2413,8 +2486,42 @@ def step_attributes():
     st.caption("Select source columns to treat as product attributes. Already-mapped columns are hidden.")
 
     mapped_cols = {c for c, v in st.session_state.mapping.items() if v != "— skip —"}
-    available   = [c for c in st.session_state.source_columns if c not in mapped_cols]
+    # =========================================================
+    # ATTRIBUTE COLUMNS
+    # =========================================================
 
+    attribute_cols = st.session_state.get(
+        "attribute_columns",
+        []
+    )
+
+    primary_cols = st.session_state.get(
+        "source_columns",
+        []
+    )
+
+    mapped_cols = set(
+        st.session_state.mapping.keys()
+    )
+
+    # =========================================================
+    # UNMAPPED PRIMARY COLS
+    # =========================================================
+
+    unmapped_primary = [
+
+        c for c in primary_cols
+
+        if c not in mapped_cols
+    ]
+
+    # =========================================================
+    # FINAL ATTRIBUTE SECTION
+    # =========================================================
+
+    available = list(dict.fromkeys(
+        attribute_cols + unmapped_primary
+    ))
     search   = st.text_input("🔍 Filter columns", placeholder="Type to search…", key="attr_search")
     filtered = [c for c in available if search.lower() in c.lower()] if search else available
 
