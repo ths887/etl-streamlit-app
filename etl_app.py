@@ -1,3 +1,4 @@
+import time
 import json
 import os
 import re
@@ -1377,17 +1378,69 @@ def used_targets() -> set:
 
 
 def read_uploaded(file) -> pd.DataFrame:
-    # OPT 3: CSV is fastest — dtype=str avoids type-inference overhead on large files.
-    # XLSX/ODS still supported. Avoids unnecessary df.copy() calls.
+
     name = file.name.lower()
+
+    # =====================================================
+    # CSV (FASTEST)
+    # =====================================================
+
+import pandas as pd
+
+def read_uploaded(file) -> pd.DataFrame:
+
+    name = file.name.lower()
+
+    # CSV FILES
     if name.endswith(".csv"):
-        return pd.read_csv(file, dtype=str, keep_default_na=False, na_values=[""])
+
+        try:
+
+            return pd.read_csv(
+                file,
+                dtype=str,
+                engine="python",
+                encoding="utf-8",
+                keep_default_na=False,
+                na_filter=False,
+                on_bad_lines="warn"
+            ).fillna("")
+
+        except UnicodeDecodeError:
+
+            file.seek(0)
+
+            return pd.read_csv(
+                file,
+                dtype=str,
+                engine="python",
+                encoding="latin1",
+                keep_default_na=False,
+                na_filter=False,
+                on_bad_lines="warn"
+            ).fillna("")
+
+    # EXCEL FILES
+    elif name.endswith(".xlsx") or name.endswith(".xls"):
+
+        return pd.read_excel(
+            file,
+            dtype=str,
+            engine="openpyxl"
+        ).fillna("")
+
+    # ODS FILES
     elif name.endswith(".ods"):
-        return pd.read_excel(file, engine="odf", dtype=str)
+
+        return pd.read_excel(
+            file,
+            dtype=str,
+            engine="odf"
+        ).fillna("")
+
     else:
-        return pd.read_excel(file, engine="openpyxl", dtype=str)
-
-
+        raise ValueError(f"Unsupported file format: {name}")
+   
 # OPT 4 (REVISED): On-demand DataFrame loader.
 # Primary path: load from a parquet cache file (10-50× faster than re-parsing CSV/XLSX).
 # The parquet cache is written alongside the original upload cache file on first load.
