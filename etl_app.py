@@ -816,19 +816,46 @@ def fetch_mapping_template(project_name: str, user_id: str) -> dict:
 
 def fetch_user_projects(user_id: str) -> list:
     """
-    Return distinct project names for a user (active records only).
+    Return project code.
+
+    Admin  -> all projects
+    User   -> only own projects
     """
+
     conn = get_conn()
+
     try:
-        df = pd.read_sql_query(
-            "SELECT DISTINCT project_name FROM etl_upload_log "
-            "WHERE user_id = %s AND status = 'active' ORDER BY project_name",
-            conn, params=(user_id,)
-        )
+
+        if is_admin():
+
+            df = pd.read_sql_query(
+                """
+                SELECT DISTINCT project_name
+                FROM etl_upload_log
+                WHERE status = 'active'
+                ORDER BY project_name
+                """,
+                conn
+            )
+
+        else:
+
+            df = pd.read_sql_query(
+                """
+                SELECT DISTINCT project_name
+                FROM etl_upload_log
+                WHERE user_id = %s
+                  AND status = 'active'
+                ORDER BY project_name
+                """,
+                conn,
+                params=(user_id,)
+            )
+
         return df["project_name"].tolist() if not df.empty else []
+
     finally:
         release_conn(conn)
-
 
 # ═══════════════════════════════════════════════════════════
 # AUTOCOMPLETE / DROPDOWN API HELPERS (Requirements 3 + 4)
@@ -839,14 +866,34 @@ def fetch_user_projects(user_id: str) -> list:
 
 @st.cache_data(ttl=60)
 def get_project_names(user_id: str) -> list[str]:
-    """Return DISTINCT active project names — powers Project Name dropdown."""
+    """Return DISTINCT active project code — powers Project Code dropdown."""
     conn = get_conn()
     try:
-        df = pd.read_sql_query(
-            "SELECT DISTINCT project_name FROM etl_upload_log "
-            "WHERE user_id = %s AND status = 'active' ORDER BY project_name",
-            conn, params=(user_id,)
-        )
+        if is_admin():
+
+            df = pd.read_sql_query(
+                """
+                SELECT DISTINCT project_name
+                FROM etl_upload_log
+                WHERE status = 'active'
+                ORDER BY project_name
+                """,
+                conn
+            )
+
+        else:
+
+            df = pd.read_sql_query(
+                """
+                SELECT DISTINCT project_name
+                FROM etl_upload_log
+                WHERE user_id = %s
+                AND status = 'active'
+                ORDER BY project_name
+                """,
+                conn,
+                params=(user_id,)
+            )
         return df["project_name"].tolist() if not df.empty else []
     finally:
         release_conn(conn)
@@ -854,24 +901,76 @@ def get_project_names(user_id: str) -> list[str]:
 
 @st.cache_data(ttl=60)
 def get_batch_codes(user_id: str, project_name: str = "") -> list[str]:
-    """Return DISTINCT active batch codes — powers Batch Code dropdown.
-    If project_name is provided, scopes results to that project."""
+    """
+    Return DISTINCT active batch codes.
+    Admin -> all users
+    User -> only own uploads
+    """
     conn = get_conn()
+
     try:
-        if project_name.strip():
-            df = pd.read_sql_query(
-                "SELECT DISTINCT batch_code FROM etl_upload_log "
-                "WHERE user_id = %s AND status = 'active' AND project_name = %s "
-                "ORDER BY batch_code",
-                conn, params=(user_id, project_name)
-            )
+
+        if is_admin():
+
+            if project_name.strip():
+
+                df = pd.read_sql_query(
+                    """
+                    SELECT DISTINCT batch_code
+                    FROM etl_upload_log
+                    WHERE status = 'active'
+                      AND project_name = %s
+                    ORDER BY batch_code
+                    """,
+                    conn,
+                    params=(project_name,)
+                )
+
+            else:
+
+                df = pd.read_sql_query(
+                    """
+                    SELECT DISTINCT batch_code
+                    FROM etl_upload_log
+                    WHERE status = 'active'
+                    ORDER BY batch_code
+                    """,
+                    conn
+                )
+
         else:
-            df = pd.read_sql_query(
-                "SELECT DISTINCT batch_code FROM etl_upload_log "
-                "WHERE user_id = %s AND status = 'active' ORDER BY batch_code",
-                conn, params=(user_id,)
-            )
+
+            if project_name.strip():
+
+                df = pd.read_sql_query(
+                    """
+                    SELECT DISTINCT batch_code
+                    FROM etl_upload_log
+                    WHERE user_id = %s
+                      AND status = 'active'
+                      AND project_name = %s
+                    ORDER BY batch_code
+                    """,
+                    conn,
+                    params=(user_id, project_name)
+                )
+
+            else:
+
+                df = pd.read_sql_query(
+                    """
+                    SELECT DISTINCT batch_code
+                    FROM etl_upload_log
+                    WHERE user_id = %s
+                      AND status = 'active'
+                    ORDER BY batch_code
+                    """,
+                    conn,
+                    params=(user_id,)
+                )
+
         return df["batch_code"].tolist() if not df.empty else []
+
     finally:
         release_conn(conn)
 
@@ -955,6 +1054,43 @@ def fetch_upload_logs_paginated(
         return df
     finally:
         release_conn(conn)
+        
+def get_total_file_count(
+    user_id: str,
+    project_name_filter: str = "",
+    batch_code_filter: str = "",
+):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    params = []
+    where_clauses = ["status = 'active'"]
+
+    if not is_admin():
+        where_clauses.append("user_id = %s")
+        params.append(user_id)
+
+    if project_name_filter.strip():
+        where_clauses.append("project_name ILIKE %s")
+        params.append(f"%{project_name_filter.strip()}%")
+
+    if batch_code_filter.strip():
+        where_clauses.append("batch_code ILIKE %s")
+        params.append(f"%{batch_code_filter.strip()}%")
+
+    sql = f"""
+        SELECT COUNT(*)
+        FROM etl_upload_log
+        WHERE {' AND '.join(where_clauses)}
+    """
+
+    cur.execute(sql, params)
+    count = cur.fetchone()[0]
+
+    cur.close()
+    release_conn(conn)
+
+    return count        
 
 
 # ═══════════════════════════════════════════════════════════
@@ -962,56 +1098,126 @@ def fetch_upload_logs_paginated(
 # ═══════════════════════════════════════════════════════════
 
 def taxonomy_search_file_level(user_id: str, taxonomy_query: str) -> pd.DataFrame:
-    """
-    NEW FUNCTION — File-level taxonomy search.
-    Returns one row per file with match_count.
-    """
+
     conn = get_conn()
+
     try:
-        df = pd.read_sql_query(
-            """
-            SELECT l.id AS upload_log_id, l.project_name, l.batch_code,
-                   l.file_name, l.upload_date, l.sku_count,
-                   COUNT(*) AS match_count
-            FROM etl_data d
-            JOIN etl_upload_log l ON d.upload_log_id = l.id
-            WHERE l.user_id = %s
-              AND l.status  = 'active'
-              AND d.status  = 'active'
-              AND d.taxonomy ILIKE %s
-            GROUP BY l.id, l.project_name, l.batch_code, l.file_name,
-                     l.upload_date, l.sku_count
-            ORDER BY l.upload_date DESC
-            """,
-            conn, params=(user_id, f"%{taxonomy_query}%")
-        )
+
+        if is_admin():
+
+            df = pd.read_sql_query(
+                """
+                SELECT l.id AS upload_log_id,
+                       l.project_name,
+                       l.batch_code,
+                       l.file_name,
+                       l.upload_date,
+                       l.sku_count,
+                       COUNT(*) AS match_count
+                FROM etl_data d
+                JOIN etl_upload_log l
+                    ON d.upload_log_id = l.id
+                WHERE l.status = 'active'
+                  AND d.status = 'active'
+                  AND d.taxonomy ILIKE %s
+                GROUP BY l.id, l.project_name, l.batch_code,
+                         l.file_name, l.upload_date, l.sku_count
+                ORDER BY l.upload_date DESC
+                """,
+                conn,
+                params=(f"%{taxonomy_query}%",)
+            )
+
+        else:
+
+            df = pd.read_sql_query(
+                """
+                SELECT l.id AS upload_log_id,
+                       l.project_name,
+                       l.batch_code,
+                       l.file_name,
+                       l.upload_date,
+                       l.sku_count,
+                       COUNT(*) AS match_count
+                FROM etl_data d
+                JOIN etl_upload_log l
+                    ON d.upload_log_id = l.id
+                WHERE l.user_id = %s
+                  AND l.status = 'active'
+                  AND d.status = 'active'
+                  AND d.taxonomy ILIKE %s
+                GROUP BY l.id, l.project_name, l.batch_code,
+                         l.file_name, l.upload_date, l.sku_count
+                ORDER BY l.upload_date DESC
+                """,
+                conn,
+                params=(user_id, f"%{taxonomy_query}%")
+            )
+
         return df
+
     finally:
         release_conn(conn)
 
-
 def taxonomy_search_global(user_id: str, taxonomy_query: str) -> pd.DataFrame:
-    """
-    NEW FUNCTION — Global (row-level) taxonomy search. Returns up to 100 rows.
-    """
+
     conn = get_conn()
+
     try:
-        df = pd.read_sql_query(
-            """
-            SELECT d.asn_altiusnxt_stock_number, d.sku_id, d.initial_description,
-                   d.taxonomy, d.brand_name, d.category,
-                   l.project_name, l.batch_code, l.file_name
-            FROM etl_data d
-            JOIN etl_upload_log l ON d.upload_log_id = l.id
-            WHERE l.user_id = %s
-              AND l.status  = 'active'
-              AND d.status  = 'active'
-              AND d.taxonomy ILIKE %s
-            LIMIT 100
-            """,
-            conn, params=(user_id, f"%{taxonomy_query}%")
-        )
+
+        if is_admin():
+
+            df = pd.read_sql_query(
+                """
+                SELECT d.asn_altiusnxt_stock_number,
+                       d.sku_id,
+                       d.initial_description,
+                       d.taxonomy,
+                       d.brand_name,
+                       d.category,
+                       l.project_name,
+                       l.batch_code,
+                       l.file_name
+                FROM etl_data d
+                JOIN etl_upload_log l
+                    ON d.upload_log_id = l.id
+                WHERE l.status = 'active'
+                  AND d.status = 'active'
+                  AND d.taxonomy ILIKE %s
+                LIMIT 100
+                """,
+                conn,
+                params=(f"%{taxonomy_query}%",)
+            )
+
+        else:
+
+            df = pd.read_sql_query(
+                """
+                SELECT d.asn_altiusnxt_stock_number,
+                       d.sku_id,
+                       d.initial_description,
+                       d.taxonomy,
+                       d.brand_name,
+                       d.category,
+                       l.project_name,
+                       l.batch_code,
+                       l.file_name
+                FROM etl_data d
+                JOIN etl_upload_log l
+                    ON d.upload_log_id = l.id
+                WHERE l.user_id = %s
+                  AND l.status = 'active'
+                  AND d.status = 'active'
+                  AND d.taxonomy ILIKE %s
+                LIMIT 100
+                """,
+                conn,
+                params=(user_id, f"%{taxonomy_query}%")
+            )
+
         return df
+
     finally:
         release_conn(conn)
 
@@ -1332,34 +1538,33 @@ def _sync_query_params():
     # to avoid bloating the URL unnecessarily.
             
     
+def progress_bar(current_step):
 
-def progress_bar(current: int):
-    labels = {
-        1: "1 Upload",
-        2: "2 Field Mapping",
-        3: "3 Attributes",
-        4: "4 Unmapped",
-        5: "5 Summary",
-        6: "✔ Result",
-    }
-    cols = st.columns(6)
+    labels = [
+        "Upload",
+        "Field Mapping",
+        "Attributes",
+        "Unmapped",
+        "Summary",
+        "Result"
+    ]
 
-    for step_num, col in zip(labels.keys(), cols):
+    cols = st.columns(len(labels))
 
-        button_type = "primary" if step_num == current else "secondary"
+    for i, label in enumerate(labels, start=1):
 
-        if step_num <= st.session_state.get("step", 1):
+        btn_type = "primary" if i == current_step else "secondary"
 
-            if col.button(
-                labels[step_num],
-                key=f"nav_step_{step_num}",
-                use_container_width=True,
-                type=button_type,
-            ):
-                st.session_state.step = step_num
-                save_workflow_state()
-                _sync_query_params()
-                st.rerun()
+        if cols[i-1].button(
+            label,
+            key=f"step_btn_{i}",
+            use_container_width=True,
+            type=btn_type
+        ):
+            st.session_state.step = i
+            save_workflow_state()
+            _sync_query_params()
+            st.rerun()
 
 def file_info_strip():
     if st.session_state.file_name:
@@ -1545,7 +1750,7 @@ def apply_project_mapping_template(source_cols: list, project_name: str, user_id
 def render_favorites_section():
     """
     NEW FUNCTION — Display projects grouped with their file counts.
-    Clicking a project name filters the file list below.
+    Clicking a project code filters the file list below.
     """
     uid = st.session_state.get("user_id")
     if not uid:
@@ -1634,7 +1839,7 @@ def render_search_and_file_list():
         cur_proj  = st.session_state.search_project
         proj_idx  = proj_list.index(cur_proj) if cur_proj in proj_list else 0
         pf = st.selectbox(
-            "Project Name",
+            "Project Code",
             options=proj_list,
             index=proj_idx,
             format_func=lambda x: "— All Projects —" if x == "" else x,
@@ -1745,7 +1950,15 @@ def render_search_and_file_list():
     if not rows:
         st.info("No uploaded files found. Try adjusting search filters.")
     else:
-        st.caption(f"Showing {len(rows)} file(s) — scroll down for more.")
+        total_files = get_total_file_count(
+        user_id=uid,
+        project_name_filter=st.session_state.search_project,
+        batch_code_filter=st.session_state.search_batch,
+        )
+
+        st.caption(
+            f"Showing {len(rows)} of {total_files} file(s)"
+        )
         render_file_cards(rows)
 
         # ── FEATURE 4: Load More button ──
@@ -2106,7 +2319,7 @@ def step_upload():
     unsafe_allow_html=True
     )
 
-    # ── NEW: Project name input here for early mapping suggestion ──
+    # ── NEW: Project Code input here for early mapping suggestion ──
     uid = st.session_state.get("user_id")
     try:
         user_projects = fetch_user_projects(uid) if uid else []
@@ -2116,7 +2329,7 @@ def step_upload():
     project_hint = ""
     if user_projects:
         project_hint = st.selectbox(
-            "📁 Project Name (optional — helps auto-suggest mapping from previous files)",
+            "📁 Project Code (optional — helps auto-suggest mapping from previous files)",
             options=["— Select or type below —"] + user_projects,
             key="upload_project_hint",
         )
@@ -2790,7 +3003,7 @@ def step_summary():
     st.markdown('<div class="input-card-title">📝 Project Details</div>', unsafe_allow_html=True)
 
     pi1, pi2, pi3 = st.columns(3)
-    project_name = pi1.text_input("Project Name *", value=st.session_state.project_name,
+    project_name = pi1.text_input("Project Code *", value=st.session_state.project_name,
                                    placeholder="e.g. AltiusNXT Q2 2026", key="input_project_name")
     batch_code   = pi2.text_input("Batch Code *",   value=st.session_state.batch_code,
                                    placeholder="e.g. BATCH01",           key="input_batch_code")
@@ -2851,7 +3064,7 @@ def step_summary():
         if st.button("🚀 Submit & Upload", type="primary", use_container_width=True):
             errors = []
             if not st.session_state.project_name.strip():
-                errors.append("Project Name is required.")
+                errors.append("Project Code is required.")
             if not st.session_state.batch_code.strip():
                 errors.append("Batch Code is required.")
 
@@ -2967,8 +3180,12 @@ def step_result():
             st.session_state.df = restored_df
         else:
             st.warning("Session expired. Please upload again.")
-            return
-    
+
+            # Don't stop page rendering
+            st.session_state.file_name = st.session_state.get("file_name", "No File")
+            st.session_state.upload_date = st.session_state.get("upload_date", "-")
+            st.session_state.sku_count = st.session_state.get("sku_count", 0)
+        
     
     _sync_query_params()
     st.markdown("<h4 style='color:#ffffff;'>✅ Upload Complete!</h4>",
@@ -2978,7 +3195,7 @@ def step_result():
         "File Name":     st.session_state.file_name,
         "Date":          st.session_state.upload_date,
         "SKU Count":     f"{int(st.session_state.sku_count or 0):,}",
-        "Project Name":  st.session_state.project_name,
+        "Project Code":  st.session_state.project_name,
         "Batch Code":    st.session_state.batch_code,
         "Author":        st.session_state.get("user_email", "—"),
         "Fields Mapped": len({c for c, v in st.session_state.mapping.items() if v != "— skip —"}),
@@ -3081,12 +3298,12 @@ def step_result():
                     if st.session_state.get(f"edit_mode_{rid}"):
                         with st.form(key=f"edit_form_{rid}"):
                             st.markdown(f"**✏️ Edit metadata for record #{rid}**")
-                            new_project = st.text_input("Project Name", value=str(row["project_name"]))
+                            new_project = st.text_input("Project Code", value=str(row["project_name"]))
                             new_batch   = st.text_input("Batch Code",   value=str(row["batch_code"]))
                             submitted   = st.form_submit_button("💾 Save Changes", type="primary")
                             if submitted:
                                 if not new_project.strip() or not new_batch.strip():
-                                    st.error("Project Name and Batch Code cannot be empty.")
+                                    st.error("Project Code and Batch Code cannot be empty.")
                                 else:
                                     try:
                                         update_log_metadata(rid, new_project.strip(), new_batch.strip())
@@ -3217,6 +3434,7 @@ def main():
         st.warning(f"⚠️ PostgreSQL not connected ({e}). Data will not be saved.")
 
     step = st.session_state.step
+    #progress_bar(st.session_state.step)
 
     # ── UI ORDER (STRICT per requirements) ──────────────────
     # On step 1 (main landing): show Favorites + Search ABOVE upload
