@@ -1184,7 +1184,7 @@ def taxonomy_search_global(user_id: str, taxonomy_query: str) -> pd.DataFrame:
                 WHERE l.status = 'active'
                   AND d.status = 'active'
                   AND d.taxonomy ILIKE %s
-                LIMIT 100
+               
                 """,
                 conn,
                 params=(f"%{taxonomy_query}%",)
@@ -1210,7 +1210,7 @@ def taxonomy_search_global(user_id: str, taxonomy_query: str) -> pd.DataFrame:
                   AND l.status = 'active'
                   AND d.status = 'active'
                   AND d.taxonomy ILIKE %s
-                LIMIT 100
+                
                 """,
                 conn,
                 params=(user_id, f"%{taxonomy_query}%")
@@ -1222,29 +1222,62 @@ def taxonomy_search_global(user_id: str, taxonomy_query: str) -> pd.DataFrame:
         release_conn(conn)
 
 
-def fetch_etl_data_for_log_with_taxonomy(log_id: int, taxonomy_filter: str = "") -> pd.DataFrame:
-    """
-    NEW FUNCTION — View file rows; optionally filter by taxonomy.
-    """
+def fetch_etl_data_for_log_with_taxonomy(
+    log_id: int,
+    taxonomy_filter: str = ""
+) -> pd.DataFrame:
+
     conn = get_conn()
+
     try:
+
         if taxonomy_filter.strip():
+
             df = pd.read_sql_query(
-                "SELECT asn_altiusnxt_stock_number, sku_id, initial_description, "
-                "manufacturer_name, brand_name, category, taxonomy, file_name, upload_date "
-                "FROM etl_data WHERE upload_log_id = %s AND taxonomy ILIKE %s "
-                "ORDER BY asn_altiusnxt_stock_number LIMIT 100",
-                conn, params=(log_id, f"%{taxonomy_filter}%")
+                """
+                SELECT
+                    asn_altiusnxt_stock_number,
+                    sku_id,
+                    initial_description,
+                    manufacturer_name,
+                    brand_name,
+                    category,
+                    taxonomy,
+                    file_name,
+                    upload_date
+                FROM etl_data
+                WHERE upload_log_id = %s
+                  AND taxonomy ILIKE %s
+                ORDER BY asn_altiusnxt_stock_number
+                """,
+                conn,
+                params=(log_id, f"%{taxonomy_filter}%")
             )
+
         else:
+
             df = pd.read_sql_query(
-                "SELECT asn_altiusnxt_stock_number, sku_id, initial_description, "
-                "manufacturer_name, brand_name, category, taxonomy, file_name, upload_date "
-                "FROM etl_data WHERE upload_log_id = %s "
-                "ORDER BY asn_altiusnxt_stock_number LIMIT 100",
-                conn, params=(log_id,)
+                """
+                SELECT
+                    asn_altiusnxt_stock_number,
+                    sku_id,
+                    initial_description,
+                    manufacturer_name,
+                    brand_name,
+                    category,
+                    taxonomy,
+                    file_name,
+                    upload_date
+                FROM etl_data
+                WHERE upload_log_id = %s
+                ORDER BY asn_altiusnxt_stock_number
+                """,
+                conn,
+                params=(log_id,)
             )
+
         return df
+
     finally:
         release_conn(conn)
 
@@ -1581,16 +1614,6 @@ def file_info_strip():
 def used_targets() -> set:
     return {v for v in st.session_state.mapping.values() if v != "— skip —"}
 
-
-def read_uploaded(file) -> pd.DataFrame:
-
-    name = file.name.lower()
-
-    # =====================================================
-    # CSV (FASTEST)
-    # =====================================================
-
-import pandas as pd
 
 def read_uploaded(file) -> pd.DataFrame:
 
@@ -1960,6 +1983,8 @@ def render_search_and_file_list():
             f"Showing {len(rows)} of {total_files} file(s)"
         )
         render_file_cards(rows)
+        
+        
 
         # ── FEATURE 4: Load More button ──
         if st.button("⬇ Load More", key="btn_load_more_search"):
@@ -2117,103 +2142,380 @@ def render_file_cards(rows: list, taxonomy_filter: str = ""):
 # NEW: FEATURE 5 — TAXONOMY SEARCH SECTION
 # ═══════════════════════════════════════════════════════════
 
+
 def render_taxonomy_search_section():
     """
-    NEW FUNCTION — Dedicated taxonomy search with file-level and global modes.
+    Dedicated taxonomy search with file-level and global modes.
     """
+
     uid = st.session_state.get("user_id")
+
     if not uid:
         return
 
     with st.expander("🔬 Taxonomy Search", expanded=False):
-        st.caption("Search SKUs by taxonomy across your uploaded files.")
+
+        st.caption(
+            "Search SKUs by taxonomy across your uploaded files."
+        )
+
+        # ==========================================
+        # INPUTS
+        # ==========================================
 
         mode = st.radio(
             "Search Mode",
-            ["File-level (Recommended)", "Global (All Rows)"],
+            [
+                "File-level (Recommended)",
+                "Global (All Rows)"
+            ],
             horizontal=True,
             key="tax_mode_radio",
         )
 
         tax_q = st.text_input(
-            "Taxonomy keyword", placeholder="e.g. Fasteners",
+            "Taxonomy keyword",
+            placeholder="e.g. Fasteners",
             key="tax_search_input"
         )
 
-        if st.button("🔬 Run Taxonomy Search", type="primary", key="btn_tax_search"):
+        # ==========================================
+        # SEARCH BUTTON
+        # ==========================================
+
+        if st.button(
+            "🔬 Run Taxonomy Search",
+            type="primary",
+            key="btn_tax_search"
+        ):
+
             if not tax_q.strip():
-                st.warning("Enter a taxonomy keyword to search.")
+
+                st.warning(
+                    "Enter a taxonomy keyword to search."
+                )
+
             else:
-                st.session_state.tax_search_query   = tax_q
-                st.session_state.tax_search_mode    = mode
+
+                # Save search state
+                st.session_state.tax_search_query = (
+                    tax_q.strip()
+                )
+
+                st.session_state.tax_search_mode = (
+                    mode
+                )
+
+                # Force fresh search
                 st.session_state.tax_search_results = None
 
-        # ── Display results ──
-        if st.session_state.get("tax_search_query"):
-            q    = st.session_state.tax_search_query
-            mode = st.session_state.tax_search_mode
+                st.rerun()
 
-            if st.session_state.tax_search_results is None:
+        # ==========================================
+        # DISPLAY RESULTS
+        # ==========================================
+
+        if st.session_state.get("tax_search_query"):
+
+            q = st.session_state.get(
+                "tax_search_query",
+                ""
+            )
+
+            current_mode = st.session_state.get(
+                "tax_search_mode",
+                "File-level (Recommended)"
+            )
+
+            # ==========================================
+            # RUN SEARCH
+            # ==========================================
+
+            if st.session_state.get(
+                "tax_search_results"
+            ) is None:
+
                 try:
-                    if mode == "File-level (Recommended)":
-                        results = taxonomy_search_file_level(uid, q)
+
+                    if current_mode == "File-level (Recommended)":
+
+                        results = taxonomy_search_file_level(
+                            uid,
+                            q
+                        )
+
                     else:
-                        results = taxonomy_search_global(uid, q)
-                    st.session_state.tax_search_results = results
+
+                        results = taxonomy_search_global(
+                            uid,
+                            q
+                        )
+
+                    st.session_state.tax_search_results = (
+                        results
+                    )
+
                 except Exception as e:
-                    st.error(f"Taxonomy search failed: {e}")
+
+                    st.error(
+                        f"Taxonomy search failed: {e}"
+                    )
+
                     return
 
-            results = st.session_state.tax_search_results
-            if results is None or results.empty:
-                st.info(f"No matches found for taxonomy: '{q}'")
+            results = st.session_state.get(
+                "tax_search_results",
+                pd.DataFrame()
+            )
+
+            # ==========================================
+            # EMPTY RESULTS
+            # ==========================================
+
+            if results.empty:
+
+                st.info(
+                    f"No matches found for taxonomy: '{q}'"
+                )
+
                 return
 
-            if mode == "File-level (Recommended)":
-                st.success(f"Found {len(results)} file(s) matching taxonomy: '{q}'")
+            # ==========================================
+            # FILE LEVEL MODE
+            # ==========================================
+
+            if current_mode == "File-level (Recommended)":
+
+                total_taxonomy_count = (
+                    results["match_count"].sum()
+                )
+
+                st.success(
+                    f"Found {len(results):,} file(s) "
+                    f"with {total_taxonomy_count:,} total taxonomy matches"
+                )
+
+                # ==========================================
+                # DOWNLOAD ALL MATCHING FILES
+                # ==========================================
+
+                if not results.empty:
+
+                    log_ids = (
+                        results["upload_log_id"]
+                        .tolist()
+                    )
+
+                    conn = get_conn()
+
+                    try:
+
+                        placeholders = ",".join(
+                            ["%s"] * len(log_ids)
+                        )
+
+                        export_df = pd.read_sql_query(
+                            f"""
+                            SELECT *
+                            FROM etl_data
+                            WHERE upload_log_id IN ({placeholders})
+                              AND status = 'active'
+                            """,
+                            conn,
+                            params=log_ids
+                        )
+
+                    finally:
+                        release_conn(conn)
+
+                    # Remove timezone columns
+                    for col in export_df.columns:
+
+                        try:
+
+                            if pd.api.types.is_datetime64tz_dtype(
+                                export_df[col]
+                            ):
+
+                                export_df[col] = (
+                                    export_df[col]
+                                    .dt.tz_localize(None)
+                                )
+
+                        except Exception:
+                            pass
+
+                    excel_buffer = BytesIO()
+
+                    with pd.ExcelWriter(
+                        excel_buffer,
+                        engine="openpyxl"
+                    ) as writer:
+
+                        export_df.to_excel(
+                            writer,
+                            index=False
+                        )
+
+                    st.download_button(
+                        label="⬇ Download All Matching Files",
+                        data=excel_buffer.getvalue(),
+                        file_name=f"taxonomy_{q}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key=f"download_file_tax_{q}_{len(results)}"
+                    )
+
+                # ==========================================
+                # FILE CARDS
+                # ==========================================
+
                 for _, row in results.iterrows():
+
                     lid = int(row["upload_log_id"])
+
                     col_info, col_btn = st.columns([8, 2])
+
                     with col_info:
+
                         st.markdown(
-                            f'<div class="file-card">'
-                            f'<strong>{row["project_name"]}</strong> / {row["batch_code"]}<br>'
-                            f'<span class="file-card-meta">📄 {row["file_name"]}  ·  '
-                            f'📅 {str(row["upload_date"])[:10]}  ·  '
-                            f'🔢 {int(row["sku_count"]):,} SKUs  ·  '
-                            f'</span>'
-                            f'<span class="taxonomy-match-badge">✅ {int(row["match_count"])} taxonomy matches</span>'
-                            f'</div>',
+                            f'''
+                            <div class="file-card">
+                                <strong>{row["project_name"]}</strong>
+                                / {row["batch_code"]}<br>
+
+                                <span class="file-card-meta">
+                                    📄 {row["file_name"]}
+                                    · 📅 {str(row["upload_date"])[:10]}
+                                    · 🔢 {int(row["sku_count"]):,} SKUs
+                                </span>
+
+                                <span class="taxonomy-match-badge">
+                                    ✅ {int(row["match_count"])} taxonomy matches
+                                </span>
+                            </div>
+                            ''',
                             unsafe_allow_html=True,
                         )
-                    with col_btn:
-                        if st.button("👁 View File", key=f"tax_view_{lid}", use_container_width=True):
-                            tk = f"tax_show_{lid}"
-                            st.session_state[tk] = not st.session_state.get(tk, False)
-                            
-                            
-                            not st.session_state.get(tk, False)
 
-                    if st.session_state.get(f"tax_show_{lid}", False):
+                    with col_btn:
+
+                        if st.button(
+                            "👁 View File",
+                            key=f"tax_view_{lid}",
+                            use_container_width=True
+                        ):
+
+                            tk = f"tax_show_{lid}"
+
+                            st.session_state[tk] = (
+                                not st.session_state.get(
+                                    tk,
+                                    False
+                                )
+                            )
+
+                    if st.session_state.get(
+                        f"tax_show_{lid}",
+                        False
+                    ):
+
                         try:
-                            view_df = fetch_etl_data_for_log_with_taxonomy(lid, q)
+
+                            view_df = (
+                                fetch_etl_data_for_log_with_taxonomy(
+                                    lid,
+                                    q
+                                )
+                            )
+
                         except Exception as e:
-                            st.error(f"Could not load: {e}")
+
+                            st.error(
+                                f"Could not load: {e}"
+                            )
+
                             view_df = pd.DataFrame()
 
                         if view_df.empty:
+
                             st.info("No rows found.")
+
                         else:
+
                             st.markdown(
-                                f"**📋 {len(view_df):,} matching rows** — "
-                                f"taxonomy filter: `{q}` — file: `{row['file_name']}`"
+                                f"**📋 {len(view_df):,} matching rows**"
                             )
-                            st.dataframe(view_df, use_container_width=True, hide_index=True)
+
+                            st.dataframe(
+                                view_df,
+                                use_container_width=True,
+                                hide_index=True
+                            )
+
+            # ==========================================
+            # GLOBAL MODE
+            # ==========================================
 
             else:
-                st.success(f"Found {len(results)} SKU row(s) matching taxonomy: '{q}' (max 100)")
-                st.dataframe(results, use_container_width=True, hide_index=True)
 
+                st.success(
+                    f"Found {len(results):,} SKU row(s) "
+                    f"matching taxonomy: '{q}'"
+                )
+
+                # ==========================================
+                # DOWNLOAD GLOBAL RESULTS
+                # ==========================================
+
+                export_df = results.copy()
+
+                for col in export_df.columns:
+
+                    try:
+
+                        if pd.api.types.is_datetime64tz_dtype(
+                            export_df[col]
+                        ):
+
+                            export_df[col] = (
+                                export_df[col]
+                                .dt.tz_localize(None)
+                            )
+
+                    except Exception:
+                        pass
+
+                excel_buffer = BytesIO()
+
+                with pd.ExcelWriter(
+                    excel_buffer,
+                    engine="openpyxl"
+                ) as writer:
+
+                    export_df.to_excel(
+                        writer,
+                        index=False
+                    )
+
+                st.download_button(
+                    label="⬇ Download Global Taxonomy Results",
+                    data=excel_buffer.getvalue(),
+                    file_name=f"global_taxonomy_{q}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key=f"download_global_tax_{q}_{len(results)}"
+                )
+
+                # ==========================================
+                # SHOW GLOBAL RESULTS
+                # ==========================================
+
+                st.dataframe(
+                    results,
+                    use_container_width=True,
+                    hide_index=True
+                )
 
 
 
