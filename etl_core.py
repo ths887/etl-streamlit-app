@@ -13,7 +13,7 @@ from psycopg2.pool import SimpleConnectionPool
 
 DB_CONFIG = {
     "host": "localhost",
-    "database": "product_data",
+    "database": "Product_Data",
     "user": "postgres",
     "password": "Altius@123",
     "port": "5432",
