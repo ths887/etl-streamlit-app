@@ -7,18 +7,22 @@ import psycopg2.extras
 from psycopg2.pool import SimpleConnectionPool
 
 
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # =========================================================
 # DATABASE CONFIG
 # =========================================================
 
 DB_CONFIG = {
-    "host": "localhost",
-    "database": "Product_Data",
-    "user": "postgres",
-    "password": "Altius@123",
-    "port": "5432",
+    "host": os.getenv("DB_HOST"),
+    "database": os.getenv("DB_NAME"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+    "port": os.getenv("DB_PORT"),
 }
-
 
 # =========================================================
 # CONNECTION POOL
