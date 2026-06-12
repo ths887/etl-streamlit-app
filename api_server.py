@@ -185,141 +185,106 @@ async def upload_file(
 # =========================================================
 # GET ALL UPLOADS
 # =========================================================
-
 @app.get("/api/uploads")
-def get_uploads(
+def list_uploads(
 
     x_api_key: str = Header(...)
 
 ):
 
-    # -----------------------------------------------------
-    # API KEY VALIDATION
-    # -----------------------------------------------------
+    conn = None
 
-    if x_api_key != API_KEY:
-
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid API Key"
-        )
-
-    conn = get_conn()
-
-    cur = conn.cursor()
+    cur = None
 
     try:
+
+        # -----------------------------------------
+        # API KEY VALIDATION
+        # -----------------------------------------
+
+        if x_api_key != API_KEY:
+
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid API Key"
+            )
+
+        # -----------------------------------------
+        # DB CONNECTION
+        # -----------------------------------------
+
+        conn = get_conn()
+
+        cur = conn.cursor()
+
+        # -----------------------------------------
+        # QUERY
+        # -----------------------------------------
 
         cur.execute("""
 
             SELECT
                 id,
+                file_name,
                 project_name,
                 batch_code,
-                file_name,
                 author_name,
                 upload_date,
                 sku_count
-
             FROM etl_upload_log
-
-            ORDER BY upload_date DESC
+            ORDER BY id DESC
+            LIMIT 100
 
         """)
 
         rows = cur.fetchall()
 
-        data = []
-
-        for row in rows:
-
-            data.append({
-
-                "upload_log_id": row[0],
-                "project_name": row[1],
-                "batch_code": row[2],
-                "file_name": row[3],
-                "author_name": row[4],
-                "upload_date": str(row[5]),
-                "sku_count": row[6]
-
-            })
-
-        return JSONResponse(data)
-
-    finally:
-
-        cur.close()
-
-        release_conn(conn)
-
-
-# =========================================================
-# GET UPLOAD DATA
-# =========================================================
-
-@app.get("/api/uploads/{upload_log_id}")
-def get_upload_data(
-
-    upload_log_id: int,
-
-    x_api_key: str = Header(...)
-
-):
-
-    # -----------------------------------------------------
-    # API KEY VALIDATION
-    # -----------------------------------------------------
-
-    if x_api_key != API_KEY:
-
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid API Key"
-        )
-
-    conn = get_conn()
-
-    cur = conn.cursor()
-
-    try:
-
-        cur.execute("""
-
-            SELECT *
-            FROM etl_data
-            WHERE upload_log_id = %s
-            LIMIT 100
-
-        """, (upload_log_id,))
-
-        columns = [desc[0] for desc in cur.description]
-
-        rows = cur.fetchall()
+        # -----------------------------------------
+        # CLEAN SERIALIZATION
+        # -----------------------------------------
 
         result = []
 
         for row in rows:
 
-            result.append(
-                dict(zip(columns, row))
-            )
+            result.append({
 
-        return JSONResponse(
-            content=jsonable_encoder(result)
-        )
+                "upload_log_id": row[0],
+
+                "file_name": row[1],
+
+                "project_name": row[2],
+
+                "batch_code": row[3],
+
+                "author_name": row[4],
+
+                "upload_date": str(row[5]),
+
+                "sku_count": row[6]
+
+            })
+
+        return result
+
+    except Exception as e:
+
+        return {
+            "error": str(e)
+        }
 
     finally:
 
-        cur.close()
+        if cur:
+            cur.close()
 
-        release_conn(conn)
+        if conn:
+            release_conn(conn)
         
-        
-@app.get("/api/uploads/{upload_log_id}/download")
+@app.get("/api/uploads/project/{project_name}/download")
 def download_upload_data(
 
-    upload_log_id: int,
+    project_name: str,
 
     x_api_key: str = Header(...)
 
@@ -341,21 +306,23 @@ def download_upload_data(
     try:
 
         # -------------------------------------------------
-        # LOAD DATA FROM DB
+        # LOAD DATA USING PROJECT NAME
         # -------------------------------------------------
 
         query = """
 
-            SELECT *
-            FROM etl_data
-            WHERE upload_log_id = %s
+            SELECT d.*
+            FROM etl_data d
+            INNER JOIN etl_upload_log l
+                ON d.upload_log_id = l.id
+            WHERE l.project_name = %s
 
         """
 
         df = pd.read_sql_query(
             query,
             conn,
-            params=(upload_log_id,)
+            params=(project_name,)
         )
 
         # -------------------------------------------------
@@ -383,14 +350,13 @@ def download_upload_data(
 
             headers={
                 "Content-Disposition":
-                f"attachment; filename=upload_{upload_log_id}.csv"
+                f"attachment; filename={project_name}.csv"
             }
         )
 
     finally:
 
-        release_conn(conn)    
-        
+        release_conn(conn)
         
        
 @app.get("/api/download/all")
@@ -465,5 +431,288 @@ def download_all_uploads(
 
     finally:
 
-        release_conn(conn)        
-            
+        release_conn(conn)   
+        
+        
+@app.get("/api/uploads/search")
+def search_uploads(
+
+    project_name: str = None,
+    batch_code: str = None,
+    upload_log_id: int = None,
+
+    x_api_key: str = Header(...)
+
+):
+
+    conn = None
+
+    cur = None
+
+    try:
+
+        # -----------------------------------------------------
+        # API KEY VALIDATION
+        # -----------------------------------------------------
+
+        if x_api_key != API_KEY:
+
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid API Key"
+            )
+
+        conn = get_conn()
+
+        cur = conn.cursor()
+
+        # -------------------------------------------------
+        # BASE QUERY
+        # -------------------------------------------------
+
+        query = """
+
+            SELECT d.*
+            FROM etl_data d
+            INNER JOIN etl_upload_log l
+                ON d.upload_log_id = l.id
+            WHERE 1=1
+
+        """
+
+        params = []
+
+        # -------------------------------------------------
+        # OPTIONAL FILTERS
+        # -------------------------------------------------
+
+        if project_name:
+
+            query += " AND l.project_name = %s "
+
+            params.append(project_name)
+
+        if batch_code:
+
+            query += " AND l.batch_code = %s "
+
+            params.append(batch_code)
+
+        if upload_log_id:
+
+            query += " AND l.id = %s "
+
+            params.append(upload_log_id)
+
+        query += " LIMIT 100 "
+
+        # -------------------------------------------------
+        # EXECUTE
+        # -------------------------------------------------
+
+        cur.execute(query, tuple(params))
+
+        columns = [desc[0] for desc in cur.description]
+
+        rows = cur.fetchall()
+
+        result = []
+
+        for row in rows:
+
+            clean_row = {}
+
+            for i, value in enumerate(row):
+
+                if isinstance(value, datetime):
+
+                    clean_row[columns[i]] = str(value)
+
+                else:
+
+                    clean_row[columns[i]] = value
+
+            result.append(clean_row)
+
+        return result
+
+    except Exception as e:
+
+        return {
+            "error": str(e)
+        }
+
+    finally:
+
+        if cur:
+            cur.close()
+
+        if conn:
+            release_conn(conn)
+        
+@app.get("/api/download/search")
+def download_search(
+
+    project_name: str = None,
+    batch_code: str = None,
+    upload_log_id: int = None,
+
+    x_api_key: str = Header(...)
+
+):
+
+    conn = None
+
+    try:
+
+        # -----------------------------------------------------
+        # API KEY VALIDATION
+        # -----------------------------------------------------
+
+        if x_api_key != API_KEY:
+
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid API Key"
+            )
+
+        # -----------------------------------------------------
+        # DB CONNECTION
+        # -----------------------------------------------------
+
+        conn = get_conn()
+
+        # -----------------------------------------------------
+        # BASE QUERY
+        # -----------------------------------------------------
+
+        query = """
+
+            SELECT d.*
+            FROM etl_data d
+            INNER JOIN etl_upload_log l
+                ON d.upload_log_id = l.id
+            WHERE 1=1
+
+        """
+
+        params = []
+
+        # -----------------------------------------------------
+        # OPTIONAL FILTERS
+        # -----------------------------------------------------
+
+        if project_name:
+
+            query += " AND l.project_name = %s "
+
+            params.append(project_name)
+
+        if batch_code:
+
+            query += " AND l.batch_code = %s "
+
+            params.append(batch_code)
+
+        if upload_log_id:
+
+            query += " AND l.id = %s "
+
+            params.append(upload_log_id)
+
+        # -----------------------------------------------------
+        # ORDERING
+        # -----------------------------------------------------
+
+        query += " ORDER BY d.upload_date DESC "
+
+        # -----------------------------------------------------
+        # LOAD DATAFRAME
+        # -----------------------------------------------------
+
+        df = pd.read_sql_query(
+            query,
+            conn,
+            params=tuple(params)
+        )
+
+        # -----------------------------------------------------
+        # EMPTY RESULT CHECK
+        # -----------------------------------------------------
+
+        if df.empty:
+
+            return {
+                "message": "No matching records found"
+            }
+
+        # -----------------------------------------------------
+        # CONVERT DATETIME COLUMNS
+        # -----------------------------------------------------
+
+        for col in df.columns:
+
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+
+                df[col] = df[col].astype(str)
+
+        # -----------------------------------------------------
+        # CSV EXPORT
+        # -----------------------------------------------------
+
+        csv_buffer = StringIO()
+
+        df.to_csv(
+            csv_buffer,
+            index=False
+        )
+
+        csv_buffer.seek(0)
+
+        # -----------------------------------------------------
+        # DYNAMIC FILENAME
+        # -----------------------------------------------------
+
+        filename = "etl_export.csv"
+
+        if project_name:
+
+            filename = f"{project_name}.csv"
+
+        if batch_code:
+
+            filename = f"{batch_code}.csv"
+
+        if upload_log_id:
+
+            filename = f"upload_{upload_log_id}.csv"
+
+        # -----------------------------------------------------
+        # RETURN DOWNLOAD
+        # -----------------------------------------------------
+
+        return StreamingResponse(
+
+            iter([csv_buffer.getvalue()]),
+
+            media_type="text/csv",
+
+            headers={
+
+                "Content-Disposition":
+                f"attachment; filename={filename}"
+
+            }
+        )
+
+    except Exception as e:
+
+        return {
+            "error": str(e)
+        }
+
+    finally:
+
+        if conn:
+
+            release_conn(conn)
