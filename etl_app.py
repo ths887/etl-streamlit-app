@@ -577,17 +577,28 @@ def insert_etl_data(
     inserted = 0
     CHUNK = 1000
     try:
-        if total_rows > 0:
-            prog = st.progress(0, text="Inserting rows…")
+
+        prog = None
+
+        # Streamlit progress only if running inside Streamlit
+        try:
+            from streamlit.runtime.scriptrunner import get_script_run_ctx
+            if get_script_run_ctx() and total_rows > 0:
+                prog = st.progress(0, text="Inserting rows…")
+
+        except:
+            prog = None
         for start in range(0, total_rows, CHUNK):
             chunk = all_rows[start:start + CHUNK]
             psycopg2.extras.execute_values(cur, insert_sql, chunk, page_size=CHUNK)
             inserted += len(chunk)
-            if total_rows > 0:
-                prog.progress(min(inserted / total_rows, 1.0),
-                              text=f"Inserting rows… {inserted:,} / {total_rows:,}")
-        conn.commit()
-        if total_rows > 0:
+            if prog:
+                prog.progress(
+                    min(inserted / total_rows, 1.0),
+                    text=f"Inserting rows… {inserted:,} / {total_rows:,}"
+                )
+                conn.commit()
+        if prog:
             prog.empty()
     except Exception:
         conn.rollback()
@@ -1505,18 +1516,18 @@ if qp.get("fp") and os.path.exists(qp.get("fp")):
 
 
 # ── Login gate ──
-if not is_logged_in():
-    show_login_page()
-    st.stop()
+#if not is_logged_in():
+ #   show_login_page()
+  #  st.stop()
 
 
 
 
-st.markdown(
-    f"<p style='color:#facc15; font-weight:600; padding:7px;'>SESSION ROLE: "
-    f"<span style='color:#ffffff'>{st.session_state.user_role}</span></p>",
-    unsafe_allow_html=True
-)
+#st.markdown(
+ #   f"<p style='color:#facc15; font-weight:600; padding:7px;'>SESSION ROLE: "
+  #  f"<span style='color:#ffffff'>{st.session_state.user_role}</span></p>",
+   # unsafe_allow_html=True
+#)
 
 
 
@@ -3680,16 +3691,24 @@ def step_result():
 # ═══════════════════════════════════════════════════════════
 
 def main():
-    # --- CHANGE START --- PATCH 2: Strict login gate using is_logged_in() + st.stop()
+
+    # ── Login gate ─────────────────────────────────────────
     if not is_logged_in():
         show_login_page()
         st.stop()
-        return
-    # --- CHANGE END ---
 
-    # Top bar
+    # ── Session Role Display ──────────────────────────────
+    st.markdown(
+        f"<p style='color:#facc15; font-weight:600; padding:7px;'>SESSION ROLE: "
+        f"<span style='color:#ffffff'>{st.session_state.user_role}</span></p>",
+        unsafe_allow_html=True
+    )
+
+    # ── Top Header ────────────────────────────────────────
     top_l, top_r = st.columns([8, 2])
+
     with top_l:
+
         st.markdown(
             '<h1 style="font-size:26px;font-weight:700;color:#ffffff;margin-bottom:2px;margin-top:15px">'
             '🔀 ETL Visual Data Mapper</h1>'
@@ -3697,29 +3716,34 @@ def main():
             'Map source file columns to target fields — step by step</p>',
             unsafe_allow_html=True,
         )
+
     with top_r:
+
         role_label = "🔴 Admin" if is_admin() else "👤 User"
+
         st.markdown(
             f'<div style="text-align:right;font-size:12px;color:#ffffff;padding-top:8px">'
             f'{role_label} &nbsp;·&nbsp; {st.session_state.get("user_email", "")}</div>',
             unsafe_allow_html=True,
         )
-        # --- AUTH FIX START ---
+
+        # ── Logout Button ────────────────────────────────
         if st.button("🚪 Logout", use_container_width=True):
 
             try:
                 get_supabase().auth.sign_out()
+
             except Exception as e:
                 print("Logout error:", e)
 
-            # Clear URL params completely
+            # Clear URL params
             st.query_params.clear()
 
-            # Clear ALL session state
+            # Clear all session state
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
 
-            # Reinitialize clean defaults
+            # Reset defaults
             st.session_state.user_id = None
             st.session_state.user_email = None
             st.session_state.user_role = "user"
@@ -3728,51 +3752,70 @@ def main():
             st.success("Logged out successfully.")
 
             st.rerun()
-        # --- AUTH FIX END ---
 
+    # ── Create Tables ─────────────────────────────────────
     try:
+
         create_tables()
+
     except Exception as e:
-        st.warning(f"⚠️ PostgreSQL not connected ({e}). Data will not be saved.")
 
+        st.warning(
+            f"⚠️ PostgreSQL not connected ({e}). Data will not be saved."
+        )
+
+    # ── Current Step ──────────────────────────────────────
     step = st.session_state.step
-    #progress_bar(st.session_state.step)
 
-    # ── UI ORDER (STRICT per requirements) ──────────────────
-    # On step 1 (main landing): show Favorites + Search ABOVE upload
+    # progress_bar(step)
+
+    # ── UI FLOW ───────────────────────────────────────────
     if step == 1:
-        # 2. Favorites (project grouping)
+
+        # Favorites Section
         try:
             render_favorites_section()
         except Exception:
             pass
 
-        # 3. Search + Uploaded File List
+        # Search + Uploaded Files
         try:
             render_search_and_file_list()
         except Exception:
             pass
 
-        # 5. Taxonomy Search
+        # Taxonomy Search
         try:
             render_taxonomy_search_section()
         except Exception:
             pass
 
-        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="divider"></div>',
+            unsafe_allow_html=True
+        )
 
-        # 4. Upload Section
+        # Upload Section
         step_upload()
 
     elif step == 2:
+
         step_mapping()
+
     elif step == 3:
+
         step_attributes()
+
     elif step == 4:
+
         step_unmapped()
+
     elif step == 5:
+
         step_summary()
+
     elif step == 6:
+
         step_result()
 
 

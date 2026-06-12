@@ -311,3 +311,19 @@ pip install -r requirements.txt
 ## Run
 
 streamlit run etl_app.py
+
+## Backend API
+
+You can start the backend API with:
+
+```bash
+uvicorn backend:app --reload --host 0.0.0.0 --port 8000
+```
+
+Then access:
+
+- `GET /api/health` — health check
+- `GET /api/uploads` — list uploaded file metadata
+- `GET /api/uploads/{upload_log_id}` — metadata for one upload
+- `GET /api/uploads/{upload_log_id}/data` — paginated ETL rows
+- `GET /api/uploads/{upload_log_id}/export` — download CSV export of the upload

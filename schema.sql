@@ -164,7 +164,35 @@ CREATE TABLE IF NOT EXISTS etl_data (
     unmapped                            JSONB
 );
 
-
+ALTER TABLE etl_data
+ADD COLUMN IF NOT EXISTS feature_bullets1 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets2 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets3 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets4 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets5 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets6 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets7 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets8 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets9 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets10 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets11 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets12 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets13 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets14 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets15 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets16 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets17 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets18 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets19 TEXT,
+ADD COLUMN IF NOT EXISTS feature_bullets20 TEXT,
+ADD COLUMN IF NOT EXISTS upc TEXT,
+ADD COLUMN IF NOT EXISTS unspsc TEXT,
+ADD COLUMN IF NOT EXISTS overall_status TEXT,
+ADD COLUMN IF NOT EXISTS product_name TEXT,
+ADD COLUMN IF NOT EXISTS fill_rate TEXT,
+ADD COLUMN IF NOT EXISTS remarks TEXT,
+ADD COLUMN IF NOT EXISTS duplicate_status_yes_no TEXT,
+ADD COLUMN IF NOT EXISTS duplicate_remarks TEXT;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- SECTION 3 : TABLE — etl_mapping_template
