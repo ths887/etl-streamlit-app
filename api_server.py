@@ -9,9 +9,12 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 import pandas as pd
 from io import StringIO
+from io import BytesIO
+from fastapi.responses import StreamingResponse
 
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
+from taxonomy_ai import AI_CATEGORY_GROUPS
 
 
 from io import BytesIO
@@ -791,7 +794,467 @@ def get_all_taxonomy(
             cur.close()
 
         if conn:
-            release_conn(conn)     
+            release_conn(conn)   
+            
+            
+
+
+
+from taxonomy_ai import AI_CATEGORY_GROUPS
+
+
+@app.get("/api/taxonomy/ai-search")
+def ai_taxonomy_search(
+
+    keyword: str,
+
+    limit: int = 100,
+
+    x_api_key: str = Header(...)
+
+):
+
+    conn = None
+
+    cur = None
+
+    try:
+
+        # -------------------------------------------------
+        # API KEY VALIDATION
+        # -------------------------------------------------
+
+        if x_api_key != API_KEY:
+
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid API Key"
+            )
+
+        # -------------------------------------------------
+        # DB CONNECTION
+        # -------------------------------------------------
+
+        conn = get_conn()
+
+        cur = conn.cursor()
+
+        keyword_lower = keyword.lower()
+
+        # -------------------------------------------------
+        # AI SEMANTIC TERMS
+        # -------------------------------------------------
+
+        search_terms = AI_CATEGORY_GROUPS.get(
+
+            keyword_lower,
+
+            [keyword_lower]
+
+        )
+
+        if keyword_lower not in search_terms:
+
+            search_terms.append(keyword_lower)
+
+        # -------------------------------------------------
+        # BUILD SQL CONDITIONS
+        # -------------------------------------------------
+
+        conditions = []
+
+        params = []
+
+        for term in search_terms:
+
+            conditions.append(
+
+                "LOWER(taxonomy) LIKE %s"
+
+            )
+
+            params.append(f"%{term}%")
+
+        where_clause = " OR ".join(conditions)
+
+        # -------------------------------------------------
+        # QUERY
+        # -------------------------------------------------
+
+       
+        
+        query = f"""
+
+            SELECT
+
+                sku_id,
+
+                initial_description,
+                additional_description,
+
+                supplier,
+                supplier_part_number,
+
+                manufacturer_name,
+                manufacturer_part_number,
+
+                brand_name,
+                series,
+                category,
+                taxonomy,
+                end_node,
+
+                manufacturer_name_1,
+                manufacturer_part_number_1,
+                manufacturer_part_number_2,
+
+                data_source_status,
+
+                html_1_url,
+                html_2_url,
+
+                specification_sheet_1_url,
+                specification_sheet_1_page,
+
+                catalog_1_url,
+                catalog_1_page,
+
+                brochure_1_url,
+                brochure_1_page,
+
+                msds_sds_url,
+                sell_sheet_url,
+                parts_url,
+                instructions_url,
+                owner_manual_url,
+                drawing_sheet_url,
+                schematic_url,
+                warranty_url,
+
+                video_link,
+                client_url,
+
+                product_image_1_url,
+                client_image_1_url,
+
+                short_description_as_is,
+
+                feature_copy,
+
+                feature_bullets1,
+                feature_bullets2,
+                feature_bullets3,
+                feature_bullets4,
+                feature_bullets5,
+                feature_bullets6,
+                feature_bullets7,
+                feature_bullets8,
+                feature_bullets9,
+                feature_bullets10,
+                feature_bullets11,
+                feature_bullets12,
+                feature_bullets13,
+                feature_bullets14,
+                feature_bullets15,
+                feature_bullets16,
+                feature_bullets17,
+                feature_bullets18,
+                feature_bullets19,
+                feature_bullets20,
+
+                upc,
+                unspsc,
+
+                overall_status,
+
+                product_name,
+
+                fill_rate,
+
+                remarks,
+
+                duplicate_status_yes_no,
+                duplicate_remarks
+
+            FROM etl_data
+
+            WHERE taxonomy IS NOT NULL
+
+            AND ({where_clause})
+
+            ORDER BY sku_id
+
+            LIMIT %s
+
+        """
+
+
+
+
+
+        params.append(limit)
+
+        # -------------------------------------------------
+        # EXECUTE
+        # -------------------------------------------------
+
+        cur.execute(query, tuple(params))
+
+        columns = [
+
+            desc[0]
+
+            for desc in cur.description
+
+        ]
+
+        rows = cur.fetchall()
+
+        result = []
+
+        # -------------------------------------------------
+        # CLEAN SERIALIZATION
+        # -------------------------------------------------
+
+        for row in rows:
+
+            clean_row = {}
+
+            for i, value in enumerate(row):
+
+                if isinstance(value, datetime):
+
+                    clean_row[columns[i]] = str(value)
+
+                else:
+
+                    clean_row[columns[i]] = value
+
+            result.append(clean_row)
+
+        return {
+
+            "search_keyword": keyword,
+
+            "matched_terms": search_terms,
+
+            "total_products": len(result),
+
+            "products": result
+
+        }
+
+    except Exception as e:
+
+        return {
+
+            "error": str(e)
+
+        }
+
+    finally:
+
+        if cur:
+            cur.close()
+
+        if conn:
+            release_conn(conn)
+            
+            
+    
+@app.get("/api/taxonomy/ai-search/download")
+def download_ai_taxonomy_search(
+
+    keyword: str,
+
+    limit: int = 10000,
+
+    x_api_key: str = Header(...)
+
+):
+
+    conn = None
+
+    try:
+
+        # -------------------------------------------------
+        # API KEY VALIDATION
+        # -------------------------------------------------
+
+        if x_api_key != API_KEY:
+
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid API Key"
+            )
+
+        # -------------------------------------------------
+        # DB CONNECTION
+        # -------------------------------------------------
+
+        conn = get_conn()
+
+        keyword_lower = keyword.lower()
+
+        # -------------------------------------------------
+        # AI SEARCH TERMS
+        # -------------------------------------------------
+
+        search_terms = AI_CATEGORY_GROUPS.get(
+
+            keyword_lower,
+
+            [keyword_lower]
+
+        )
+
+        if keyword_lower not in search_terms:
+
+            search_terms.append(keyword_lower)
+
+        # -------------------------------------------------
+        # BUILD SQL CONDITIONS
+        # -------------------------------------------------
+
+        conditions = []
+
+        params = []
+
+        for term in search_terms:
+
+            conditions.append(
+
+                "LOWER(taxonomy) LIKE %s"
+
+            )
+
+            params.append(f"%{term}%")
+
+        where_clause = " OR ".join(conditions)
+
+        # -------------------------------------------------
+        # QUERY
+        # -------------------------------------------------
+
+        query = f"""
+
+            SELECT *
+
+            FROM etl_data
+
+            WHERE taxonomy IS NOT NULL
+
+            AND ({where_clause})
+
+            ORDER BY sku_id
+
+            LIMIT %s
+
+        """
+
+        params.append(limit)
+
+        # -------------------------------------------------
+        # LOAD DATAFRAME
+        # -------------------------------------------------
+
+        df = pd.read_sql_query(
+
+            query,
+
+            conn,
+
+            params=tuple(params)
+
+        )
+
+        # -------------------------------------------------
+        # EMPTY CHECK
+        # -------------------------------------------------
+
+        if df.empty:
+
+            return {
+
+                "message": "No matching products found"
+
+            }
+            
+            
+        # -------------------------------------------------
+        # REMOVE TIMEZONE
+        # -------------------------------------------------
+
+        for col in df.select_dtypes(include=["datetimetz"]).columns:
+
+            df[col] = df[col].dt.tz_localize(None)    
+
+        # -------------------------------------------------
+        # EXCEL EXPORT
+        # -------------------------------------------------
+
+        output = BytesIO()
+
+        with pd.ExcelWriter(
+
+            output,
+
+            engine="openpyxl"
+
+        ) as writer:
+
+            df.to_excel(
+
+                writer,
+
+                index=False,
+
+                sheet_name="AI_Search_Results"
+
+            )
+
+        output.seek(0)
+
+        # -------------------------------------------------
+        # RETURN EXCEL FILE
+        # -------------------------------------------------
+
+        filename = (
+            f"taxonomy_ai_search_{keyword}.xlsx"
+        )
+
+        return StreamingResponse(
+
+            output,
+
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+
+            headers={
+
+                "Content-Disposition":
+                f"attachment; filename={filename}"
+
+            }
+
+        )
+
+    except Exception as e:
+
+        return {
+
+            "error": str(e)
+
+        }
+
+    finally:
+
+        if conn:
+
+            release_conn(conn)
+
+            
             
 @app.get("/api/taxonomy/project/{project_name}")
 def get_project_taxonomy(
@@ -1110,4 +1573,230 @@ def download_all_taxonomy(
 
         if conn:
 
-            release_conn(conn)                               
+            release_conn(conn)   
+            
+@app.get("/api/duplicates")
+def get_duplicates(
+
+    x_api_key: str = Header(...)
+
+):
+
+    conn = None
+
+    try:
+
+        # -----------------------------------------
+        # API KEY VALIDATION
+        # -----------------------------------------
+
+        if x_api_key != API_KEY:
+
+            raise HTTPException(
+
+                status_code=401,
+
+                detail="Invalid API Key"
+
+            )
+
+        conn = get_conn()
+
+        # -----------------------------------------
+        # QUERY
+        # -----------------------------------------
+
+        query = """
+
+            SELECT
+
+                manufacturer_name,
+
+                manufacturer_part_number,
+
+                COUNT(*) AS duplicate_count
+
+            FROM etl_data
+
+            WHERE manufacturer_name IS NOT NULL
+
+            AND manufacturer_part_number IS NOT NULL
+
+            GROUP BY
+
+                manufacturer_name,
+
+                manufacturer_part_number
+
+            HAVING COUNT(*) > 1
+
+            ORDER BY duplicate_count DESC
+
+        """
+
+        df = pd.read_sql_query(
+
+            query,
+
+            conn
+
+        )
+
+        # -----------------------------------------
+        # EMPTY CHECK
+        # -----------------------------------------
+
+        if df.empty:
+
+            return {
+
+                "message": "No duplicates found"
+
+            }
+
+        return df.to_dict(
+
+            orient="records"
+
+        )
+
+    except Exception as e:
+
+        return {
+
+            "error": str(e)
+
+        }
+
+    finally:
+
+        if conn:
+
+            release_conn(conn)     
+            
+@app.get("/api/duplicates/download")
+def download_duplicates(
+
+    x_api_key: str = Header(...)
+
+):
+
+    conn = None
+
+    try:
+
+        # -----------------------------------------
+        # API KEY VALIDATION
+        # -----------------------------------------
+
+        if x_api_key != API_KEY:
+
+            raise HTTPException(
+
+                status_code=401,
+
+                detail="Invalid API Key"
+
+            )
+
+        conn = get_conn()
+
+        # -----------------------------------------
+        # QUERY
+        # -----------------------------------------
+
+        query = """
+
+            SELECT
+
+                manufacturer_name,
+
+                manufacturer_part_number,
+
+                COUNT(*) AS duplicate_count
+
+            FROM etl_data
+
+            WHERE manufacturer_name IS NOT NULL
+
+            AND manufacturer_part_number IS NOT NULL
+
+            GROUP BY
+
+                manufacturer_name,
+
+                manufacturer_part_number
+
+            HAVING COUNT(*) > 1
+
+            ORDER BY duplicate_count DESC
+
+        """
+
+        df = pd.read_sql_query(
+
+            query,
+
+            conn
+
+        )
+
+        # -----------------------------------------
+        # EMPTY CHECK
+        # -----------------------------------------
+
+        if df.empty:
+
+            return {
+
+                "message": "No duplicates found"
+
+            }
+
+        # -----------------------------------------
+        # CSV EXPORT
+        # -----------------------------------------
+
+        csv_buffer = StringIO()
+
+        df.to_csv(
+
+            csv_buffer,
+
+            index=False
+
+        )
+
+        csv_buffer.seek(0)
+
+        # -----------------------------------------
+        # RETURN DOWNLOAD
+        # -----------------------------------------
+
+        return StreamingResponse(
+
+            iter([csv_buffer.getvalue()]),
+
+            media_type="text/csv",
+
+            headers={
+
+                "Content-Disposition":
+                "attachment; filename=duplicate_report.csv"
+
+            }
+        )
+
+    except Exception as e:
+
+        return {
+
+            "error": str(e)
+
+        }
+
+    finally:
+
+        if conn:
+
+            release_conn(conn)                                               
