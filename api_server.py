@@ -716,3 +716,398 @@ def download_search(
         if conn:
 
             release_conn(conn)
+            
+@app.get("/api/taxonomy")
+def get_all_taxonomy(
+
+    x_api_key: str = Header(...)
+
+):
+
+    conn = None
+
+    cur = None
+
+    try:
+
+        # -----------------------------------------
+        # API KEY VALIDATION
+        # -----------------------------------------
+
+        if x_api_key != API_KEY:
+
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid API Key"
+            )
+
+        conn = get_conn()
+
+        cur = conn.cursor()
+
+        # -----------------------------------------
+        # QUERY
+        # -----------------------------------------
+
+        cur.execute("""
+
+            SELECT DISTINCT taxonomy
+            FROM etl_data
+            WHERE taxonomy IS NOT NULL
+            AND taxonomy <> ''
+            ORDER BY taxonomy
+
+        """)
+
+        rows = cur.fetchall()
+
+        taxonomy_list = [
+
+            row[0]
+
+            for row in rows
+
+            if row[0]
+
+        ]
+
+        return {
+
+            "total_taxonomies": len(taxonomy_list),
+
+            "taxonomy": taxonomy_list
+
+        }
+
+    except Exception as e:
+
+        return {
+            "error": str(e)
+        }
+
+    finally:
+
+        if cur:
+            cur.close()
+
+        if conn:
+            release_conn(conn)     
+            
+@app.get("/api/taxonomy/project/{project_name}")
+def get_project_taxonomy(
+
+    project_name: str,
+
+    x_api_key: str = Header(...)
+
+):
+
+    conn = None
+
+    cur = None
+
+    try:
+
+        # -----------------------------------------
+        # API KEY VALIDATION
+        # -----------------------------------------
+
+        if x_api_key != API_KEY:
+
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid API Key"
+            )
+
+        conn = get_conn()
+
+        cur = conn.cursor()
+
+        # -----------------------------------------
+        # QUERY
+        # -----------------------------------------
+
+        cur.execute("""
+
+            SELECT DISTINCT d.taxonomy
+
+            FROM etl_data d
+
+            INNER JOIN etl_upload_log l
+                ON d.upload_log_id = l.id
+
+            WHERE l.project_name = %s
+
+            AND d.taxonomy IS NOT NULL
+
+            AND d.taxonomy <> ''
+
+            ORDER BY d.taxonomy
+
+        """, (project_name,))
+
+        rows = cur.fetchall()
+
+        taxonomy_list = [
+
+            row[0]
+
+            for row in rows
+
+            if row[0]
+
+        ]
+
+        return {
+
+            "project_name": project_name,
+
+            "total_taxonomies": len(taxonomy_list),
+
+            "taxonomy": taxonomy_list
+
+        }
+
+    except Exception as e:
+
+        return {
+            "error": str(e)
+        }
+
+    finally:
+
+        if cur:
+            cur.close()
+
+        if conn:
+            release_conn(conn)        
+            
+@app.get("/api/taxonomy/project/{project_name}/download")
+def download_project_taxonomy(
+
+    project_name: str,
+
+    x_api_key: str = Header(...)
+
+):
+
+    conn = None
+
+    try:
+
+        # -----------------------------------------
+        # API KEY VALIDATION
+        # -----------------------------------------
+
+        if x_api_key != API_KEY:
+
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid API Key"
+            )
+
+        conn = get_conn()
+
+        # -----------------------------------------
+        # QUERY
+        # -----------------------------------------
+
+        query = """
+
+            SELECT DISTINCT
+                d.taxonomy
+
+            FROM etl_data d
+
+            INNER JOIN etl_upload_log l
+                ON d.upload_log_id = l.id
+
+            WHERE l.project_name = %s
+
+            AND d.taxonomy IS NOT NULL
+
+            AND d.taxonomy <> ''
+
+            ORDER BY d.taxonomy
+
+        """
+
+        df = pd.read_sql_query(
+
+            query,
+
+            conn,
+
+            params=(project_name,)
+
+        )
+
+        # -----------------------------------------
+        # EMPTY CHECK
+        # -----------------------------------------
+
+        if df.empty:
+
+            return {
+                "message": "No taxonomy found"
+            }
+
+        # -----------------------------------------
+        # CSV EXPORT
+        # -----------------------------------------
+
+        csv_buffer = StringIO()
+
+        df.to_csv(
+
+            csv_buffer,
+
+            index=False
+
+        )
+
+        csv_buffer.seek(0)
+
+        # -----------------------------------------
+        # RETURN DOWNLOAD
+        # -----------------------------------------
+
+        return StreamingResponse(
+
+            iter([csv_buffer.getvalue()]),
+
+            media_type="text/csv",
+
+            headers={
+
+                "Content-Disposition":
+                f"attachment; filename={project_name}_taxonomy.csv"
+
+            }
+        )
+
+    except Exception as e:
+
+        return {
+            "error": str(e)
+        }
+
+    finally:
+
+        if conn:
+            release_conn(conn)    
+            
+@app.get("/api/taxonomy/download/all")
+def download_all_taxonomy(
+
+    x_api_key: str = Header(...)
+
+):
+
+    conn = None
+
+    try:
+
+        # -------------------------------------------------
+        # API KEY VALIDATION
+        # -------------------------------------------------
+
+        if x_api_key != API_KEY:
+
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid API Key"
+            )
+
+        # -------------------------------------------------
+        # DB CONNECTION
+        # -------------------------------------------------
+
+        conn = get_conn()
+
+        # -------------------------------------------------
+        # QUERY
+        # -------------------------------------------------
+
+        query = """
+
+            SELECT DISTINCT
+                taxonomy
+
+            FROM etl_data
+
+            WHERE taxonomy IS NOT NULL
+
+            AND taxonomy <> ''
+
+            ORDER BY taxonomy
+
+        """
+
+        df = pd.read_sql_query(
+
+            query,
+
+            conn
+
+        )
+
+        # -------------------------------------------------
+        # EMPTY CHECK
+        # -------------------------------------------------
+
+        if df.empty:
+
+            return {
+
+                "message": "No taxonomy found"
+
+            }
+
+        # -------------------------------------------------
+        # CSV EXPORT
+        # -------------------------------------------------
+
+        csv_buffer = StringIO()
+
+        df.to_csv(
+
+            csv_buffer,
+
+            index=False
+
+        )
+
+        csv_buffer.seek(0)
+
+        # -------------------------------------------------
+        # RETURN DOWNLOAD
+        # -------------------------------------------------
+
+        return StreamingResponse(
+
+            iter([csv_buffer.getvalue()]),
+
+            media_type="text/csv",
+
+            headers={
+
+                "Content-Disposition":
+                "attachment; filename=all_taxonomy.csv"
+
+            }
+        )
+
+    except Exception as e:
+
+        return {
+
+            "error": str(e)
+
+        }
+
+    finally:
+
+        if conn:
+
+            release_conn(conn)                               
