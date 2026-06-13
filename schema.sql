@@ -445,3 +445,17 @@ FROM etl_upload_log
 WHERE user_email = 'thushara@altiusnxt.com';
 
 SELECT * FROM user_roles;
+
+
+CREATE INDEX idx_etl_taxonomy
+ON etl_data(taxonomy);
+
+CREATE INDEX idx_etl_mpn
+ON etl_data(manufacturer_part_number);
+
+CREATE INDEX idx_etl_mfr
+ON etl_data(manufacturer_name);
+
+SELECT column_name
+FROM information_schema.columns
+WHERE table_name = 'etl_data';
