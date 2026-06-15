@@ -17,8 +17,6 @@ from fastapi.encoders import jsonable_encoder
 from taxonomy_ai import AI_CATEGORY_GROUPS
 
 
-from io import BytesIO
-
 from datetime import datetime
 import os
 from dotenv import load_dotenv
@@ -720,87 +718,6 @@ def download_search(
 
             release_conn(conn)
             
-@app.get("/api/taxonomy")
-def get_all_taxonomy(
-
-    x_api_key: str = Header(...)
-
-):
-
-    conn = None
-
-    cur = None
-
-    try:
-
-        # -----------------------------------------
-        # API KEY VALIDATION
-        # -----------------------------------------
-
-        if x_api_key != API_KEY:
-
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid API Key"
-            )
-
-        conn = get_conn()
-
-        cur = conn.cursor()
-
-        # -----------------------------------------
-        # QUERY
-        # -----------------------------------------
-
-        cur.execute("""
-
-            SELECT DISTINCT taxonomy
-            FROM etl_data
-            WHERE taxonomy IS NOT NULL
-            AND taxonomy <> ''
-            ORDER BY taxonomy
-
-        """)
-
-        rows = cur.fetchall()
-
-        taxonomy_list = [
-
-            row[0]
-
-            for row in rows
-
-            if row[0]
-
-        ]
-
-        return {
-
-            "total_taxonomies": len(taxonomy_list),
-
-            "taxonomy": taxonomy_list
-
-        }
-
-    except Exception as e:
-
-        return {
-            "error": str(e)
-        }
-
-    finally:
-
-        if cur:
-            cur.close()
-
-        if conn:
-            release_conn(conn)   
-            
-            
-
-
-
-from taxonomy_ai import AI_CATEGORY_GROUPS
 
 
 @app.get("/api/taxonomy/ai-search")
@@ -1606,33 +1523,65 @@ def get_duplicates(
         # QUERY
         # -----------------------------------------
 
+        
         query = """
 
             SELECT
 
+                asn_altiusnxt_stock_number,
+
+                file_name,
+
                 manufacturer_name,
 
-                manufacturer_part_number,
+                manufacturer_part_number
+                
 
-                COUNT(*) AS duplicate_count
+            FROM etl_data e
 
-            FROM etl_data
+            WHERE (
 
-            WHERE manufacturer_name IS NOT NULL
+                LOWER(TRIM(e.manufacturer_name)),
 
-            AND manufacturer_part_number IS NOT NULL
+                LOWER(TRIM(e.manufacturer_part_number))
 
-            GROUP BY
+            ) IN (
+
+                SELECT
+
+                    LOWER(TRIM(manufacturer_name)),
+
+                    LOWER(TRIM(manufacturer_part_number))
+
+                FROM etl_data
+
+                WHERE manufacturer_name IS NOT NULL
+
+                AND manufacturer_part_number IS NOT NULL
+
+                GROUP BY
+
+                    LOWER(TRIM(manufacturer_name)),
+
+                    LOWER(TRIM(manufacturer_part_number))
+
+                HAVING COUNT(*) > 1
+
+            )
+
+            ORDER BY
 
                 manufacturer_name,
 
                 manufacturer_part_number
 
-            HAVING COUNT(*) > 1
-
-            ORDER BY duplicate_count DESC
-
         """
+
+
+        
+        # -----------------------------------------
+        # LOAD DATAFRAME
+        # -----------------------------------------
 
         df = pd.read_sql_query(
 
@@ -1641,6 +1590,8 @@ def get_duplicates(
             conn
 
         )
+
+
 
         # -----------------------------------------
         # EMPTY CHECK
@@ -1654,11 +1605,20 @@ def get_duplicates(
 
             }
 
-        return df.to_dict(
+       
+        return {
 
-            orient="records"
+            "total_duplicate_rows": len(df),
 
-        )
+            "columns": list(df.columns),
+
+            "rows": df.to_dict(
+                orient="records"
+            )
+
+        }
+
+
 
     except Exception as e:
 
@@ -1705,33 +1665,65 @@ def download_duplicates(
         # QUERY
         # -----------------------------------------
 
+        
         query = """
 
             SELECT
 
+                asn_altiusnxt_stock_number,
+
+                file_name,
+
                 manufacturer_name,
 
-                manufacturer_part_number,
+                manufacturer_part_number
+            
 
-                COUNT(*) AS duplicate_count
+            FROM etl_data e
 
-            FROM etl_data
+            WHERE (
 
-            WHERE manufacturer_name IS NOT NULL
+                LOWER(TRIM(e.manufacturer_name)),
 
-            AND manufacturer_part_number IS NOT NULL
+                LOWER(TRIM(e.manufacturer_part_number))
 
-            GROUP BY
+            ) IN (
+
+                SELECT
+
+                    LOWER(TRIM(manufacturer_name)),
+
+                    LOWER(TRIM(manufacturer_part_number))
+
+                FROM etl_data
+
+                WHERE manufacturer_name IS NOT NULL
+
+                AND manufacturer_part_number IS NOT NULL
+
+                GROUP BY
+
+                    LOWER(TRIM(manufacturer_name)),
+
+                    LOWER(TRIM(manufacturer_part_number))
+
+                HAVING COUNT(*) > 1
+
+            )
+
+            ORDER BY
 
                 manufacturer_name,
 
                 manufacturer_part_number
 
-            HAVING COUNT(*) > 1
-
-            ORDER BY duplicate_count DESC
-
         """
+
+
+        
+        # -----------------------------------------
+        # LOAD DATAFRAME
+        # -----------------------------------------
 
         df = pd.read_sql_query(
 
@@ -1740,6 +1732,9 @@ def download_duplicates(
             conn
 
         )
+
+
+
 
         # -----------------------------------------
         # EMPTY CHECK
@@ -1753,39 +1748,64 @@ def download_duplicates(
 
             }
 
-        # -----------------------------------------
-        # CSV EXPORT
-        # -----------------------------------------
+        
+        # -------------------------------------------------
+        # REMOVE TIMEZONE FOR EXCEL
+        # -------------------------------------------------
 
-        csv_buffer = StringIO()
+        for col in df.select_dtypes(
+            include=["datetimetz"]
+        ).columns:
 
-        df.to_csv(
+            df[col] = df[col].dt.tz_localize(None)
 
-            csv_buffer,
+        # -------------------------------------------------
+        # EXCEL EXPORT
+        # -------------------------------------------------
 
-            index=False
+        output = BytesIO()
 
-        )
+        with pd.ExcelWriter(
 
-        csv_buffer.seek(0)
+            output,
 
-        # -----------------------------------------
-        # RETURN DOWNLOAD
-        # -----------------------------------------
+            engine="openpyxl"
+
+        ) as writer:
+
+            df.to_excel(
+
+                writer,
+
+                index=False,
+
+                sheet_name="Duplicate_Report"
+
+            )
+
+        output.seek(0)
+
+        # -------------------------------------------------
+        # RETURN EXCEL
+        # -------------------------------------------------
 
         return StreamingResponse(
 
-            iter([csv_buffer.getvalue()]),
+            output,
 
-            media_type="text/csv",
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
 
             headers={
 
                 "Content-Disposition":
-                "attachment; filename=duplicate_report.csv"
+                "attachment; filename=duplicate_report.xlsx"
 
             }
         )
+
+
 
     except Exception as e:
 
