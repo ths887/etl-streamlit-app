@@ -474,3 +474,5 @@ CREATE INDEX idx_project_batch ON etl_upload_log( project_name, batch_code );
 CREATE INDEX idx_mfr_part ON etl_data( manufacturer_name, manufacturer_part_number );
 
 CREATE INDEX idx_taxonomy ON etl_data(taxonomy);
+
+CREATE INDEX idx_taxonomy_trgm ON etl_data USING gin (taxonomy gin_trgm_ops);
