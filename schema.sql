@@ -459,3 +459,9 @@ ON etl_data(manufacturer_name);
 SELECT column_name
 FROM information_schema.columns
 WHERE table_name = 'etl_data';
+
+CREATE INDEX idx_duplicate_check
+ON etl_data(
+    manufacturer_name,
+    manufacturer_part_number
+);
