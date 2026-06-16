@@ -1492,6 +1492,7 @@ def download_all_taxonomy(
 
             release_conn(conn)   
             
+                                              
 @app.get("/api/duplicates")
 def get_duplicates(
 
@@ -1527,53 +1528,37 @@ def get_duplicates(
         query = """
 
             SELECT
-
                 asn_altiusnxt_stock_number,
-
                 file_name,
-
                 manufacturer_name,
-
                 manufacturer_part_number
-                
-
             FROM etl_data e
-
-            WHERE (
-
-                LOWER(TRIM(e.manufacturer_name)),
-
-                LOWER(TRIM(e.manufacturer_part_number))
-
-            ) IN (
-
-                SELECT
-
-                    LOWER(TRIM(manufacturer_name)),
-
-                    LOWER(TRIM(manufacturer_part_number))
-
-                FROM etl_data
-
-                WHERE manufacturer_name IS NOT NULL
-
-                AND manufacturer_part_number IS NOT NULL
-
-                GROUP BY
-
-                    LOWER(TRIM(manufacturer_name)),
-
-                    LOWER(TRIM(manufacturer_part_number))
-
-                HAVING COUNT(*) > 1
-
-            )
-
+            WHERE
+                e.manufacturer_name IS NOT NULL
+                AND e.manufacturer_part_number IS NOT NULL
+                AND TRIM(e.manufacturer_name) <> ''
+                AND TRIM(e.manufacturer_part_number) <> ''
+                AND (
+                    LOWER(TRIM(e.manufacturer_name)),
+                    LOWER(TRIM(e.manufacturer_part_number))
+                ) IN (
+                    SELECT
+                        LOWER(TRIM(manufacturer_name)),
+                        LOWER(TRIM(manufacturer_part_number))
+                    FROM etl_data
+                    WHERE
+                        manufacturer_name IS NOT NULL
+                        AND manufacturer_part_number IS NOT NULL
+                        AND TRIM(manufacturer_name) <> ''
+                        AND TRIM(manufacturer_part_number) <> ''
+                    GROUP BY
+                        LOWER(TRIM(manufacturer_name)),
+                        LOWER(TRIM(manufacturer_part_number))
+                    HAVING COUNT(*) > 1
+                )
             ORDER BY
-
                 manufacturer_name,
-
-                manufacturer_part_number
+                manufacturer_part_number;
 
         """
 
@@ -1669,53 +1654,37 @@ def download_duplicates(
         query = """
 
             SELECT
-
                 asn_altiusnxt_stock_number,
-
                 file_name,
-
                 manufacturer_name,
-
                 manufacturer_part_number
-            
-
             FROM etl_data e
-
-            WHERE (
-
-                LOWER(TRIM(e.manufacturer_name)),
-
-                LOWER(TRIM(e.manufacturer_part_number))
-
-            ) IN (
-
-                SELECT
-
-                    LOWER(TRIM(manufacturer_name)),
-
-                    LOWER(TRIM(manufacturer_part_number))
-
-                FROM etl_data
-
-                WHERE manufacturer_name IS NOT NULL
-
-                AND manufacturer_part_number IS NOT NULL
-
-                GROUP BY
-
-                    LOWER(TRIM(manufacturer_name)),
-
-                    LOWER(TRIM(manufacturer_part_number))
-
-                HAVING COUNT(*) > 1
-
-            )
-
+            WHERE
+                e.manufacturer_name IS NOT NULL
+                AND e.manufacturer_part_number IS NOT NULL
+                AND TRIM(e.manufacturer_name) <> ''
+                AND TRIM(e.manufacturer_part_number) <> ''
+                AND (
+                    LOWER(TRIM(e.manufacturer_name)),
+                    LOWER(TRIM(e.manufacturer_part_number))
+                ) IN (
+                    SELECT
+                        LOWER(TRIM(manufacturer_name)),
+                        LOWER(TRIM(manufacturer_part_number))
+                    FROM etl_data
+                    WHERE
+                        manufacturer_name IS NOT NULL
+                        AND manufacturer_part_number IS NOT NULL
+                        AND TRIM(manufacturer_name) <> ''
+                        AND TRIM(manufacturer_part_number) <> ''
+                    GROUP BY
+                        LOWER(TRIM(manufacturer_name)),
+                        LOWER(TRIM(manufacturer_part_number))
+                    HAVING COUNT(*) > 1
+                )
             ORDER BY
-
                 manufacturer_name,
-
-                manufacturer_part_number
+                manufacturer_part_number;
 
         """
 
@@ -1819,4 +1788,4 @@ def download_duplicates(
 
         if conn:
 
-            release_conn(conn)                                               
+            release_conn(conn)
