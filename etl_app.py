@@ -1066,6 +1066,7 @@ def fetch_upload_logs_paginated(
     finally:
         release_conn(conn)
         
+
 def get_total_file_count(
     user_id: str,
     project_name_filter: str = "",
@@ -1090,19 +1091,21 @@ def get_total_file_count(
         params.append(f"%{batch_code_filter.strip()}%")
 
     sql = f"""
-        SELECT COUNT(*)
+        SELECT
+            COUNT(*) AS total_files,
+            COALESCE(SUM(sku_count), 0) AS total_skus
         FROM etl_upload_log
         WHERE {' AND '.join(where_clauses)}
     """
 
     cur.execute(sql, params)
-    count = cur.fetchone()[0]
+
+    total_files, total_skus = cur.fetchone()
 
     cur.close()
     release_conn(conn)
 
-    return count        
-
+    return total_files, total_skus
 
 # ═══════════════════════════════════════════════════════════
 # NEW: FEATURE 5 — TAXONOMY SEARCH DB FUNCTIONS
@@ -1984,15 +1987,30 @@ def render_search_and_file_list():
     if not rows:
         st.info("No uploaded files found. Try adjusting search filters.")
     else:
-        total_files = get_total_file_count(
-        user_id=uid,
-        project_name_filter=st.session_state.search_project,
-        batch_code_filter=st.session_state.search_batch,
+        total_files, total_skus = get_total_file_count(
+            user_id=uid,
+            project_name_filter=st.session_state.search_project,
+            batch_code_filter=st.session_state.search_batch,
         )
-
+        
+        c1, c2 = st.columns(2)
+        
+        with c1:
+            st.metric(
+                "Total Files",
+                f"{total_files:,}"
+            )
+        
+        with c2:
+            st.metric(
+                "Total SKUs",
+                f"{total_skus:,}"
+            )
+        
         st.caption(
-            f"Showing {len(rows)} of {total_files} file(s)"
+            f"Showing {len(rows)} of {total_files:,} file(s)"
         )
+        
         render_file_cards(rows)
         
         
