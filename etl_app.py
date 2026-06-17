@@ -1066,7 +1066,6 @@ def fetch_upload_logs_paginated(
     finally:
         release_conn(conn)
         
-
 def get_total_file_count(
     user_id: str,
     project_name_filter: str = "",
@@ -1075,7 +1074,7 @@ def get_total_file_count(
     conn = get_conn()
     cur = conn.cursor()
 
-    params = []
+    params = [] 
     where_clauses = ["status = 'active'"]
 
     if not is_admin():
@@ -1106,6 +1105,47 @@ def get_total_file_count(
     release_conn(conn)
 
     return total_files, total_skus
+
+
+def get_duplicate_count():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    sql = """
+        SELECT COUNT(*)
+        FROM etl_data e
+        WHERE
+            e.manufacturer_name IS NOT NULL
+            AND e.manufacturer_part_number IS NOT NULL
+            AND TRIM(e.manufacturer_name) <> ''
+            AND TRIM(e.manufacturer_part_number) <> ''
+            AND (
+                LOWER(TRIM(e.manufacturer_name)),
+                LOWER(TRIM(e.manufacturer_part_number))
+            ) IN (
+                SELECT
+                    LOWER(TRIM(manufacturer_name)),
+                    LOWER(TRIM(manufacturer_part_number))
+                FROM etl_data
+                WHERE
+                    manufacturer_name IS NOT NULL
+                    AND manufacturer_part_number IS NOT NULL
+                    AND TRIM(manufacturer_name) <> ''
+                    AND TRIM(manufacturer_part_number) <> ''
+                GROUP BY
+                    LOWER(TRIM(manufacturer_name)),
+                    LOWER(TRIM(manufacturer_part_number))
+                HAVING COUNT(*) > 1
+            )
+    """
+
+    cur.execute(sql)
+    count = cur.fetchone()[0]
+
+    cur.close()
+    release_conn(conn)
+
+    return count
 
 # ═══════════════════════════════════════════════════════════
 # NEW: FEATURE 5 — TAXONOMY SEARCH DB FUNCTIONS
@@ -1992,25 +2032,34 @@ def render_search_and_file_list():
             project_name_filter=st.session_state.search_project,
             batch_code_filter=st.session_state.search_batch,
         )
+        duplicate_count = get_duplicate_count()
+
+        c1, c2, c3 = st.columns(3)
         
-        c1, c2 = st.columns(2)
-        
+    
+
         with c1:
             st.metric(
                 "Total Files",
                 f"{total_files:,}"
             )
-        
+
         with c2:
             st.metric(
                 "Total SKUs",
                 f"{total_skus:,}"
             )
-        
+            
+        with c3:
+            st.metric(
+                "Duplicate Rows",
+                f"{duplicate_count:,}"
+            )    
+
         st.caption(
             f"Showing {len(rows)} of {total_files:,} file(s)"
         )
-        
+
         render_file_cards(rows)
         
         

@@ -1,3 +1,8 @@
+from fastapi import Depends 
+from fastapi.security import ( HTTPBearer, HTTPAuthorizationCredentials ) 
+from jose import jwt 
+from jose.exceptions import JWTError
+
 from fastapi import (
     FastAPI,
     UploadFile,
@@ -23,6 +28,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+SUPABASE_JWT_SECRET = os.getenv( "SUPABASE_JWT_SECRET" ) 
+security = HTTPBearer()
+
 
 from etl_core import (
     read_uploaded,
@@ -38,6 +46,118 @@ from etl_core import (
 # =========================================================
 
 API_KEY = os.getenv("API_KEY")
+
+
+
+def get_role_for_user(
+
+    user_id,
+    email
+
+):
+
+    # EXAMPLE
+
+    admin_emails = [
+
+        "govind@altiusnxt.com",
+
+        "thushara@altiusnxt.com"
+
+    ]
+
+    if email in admin_emails:
+
+        return "admin"
+
+    return "user"
+
+
+
+
+def verify_jwt_token(
+
+    credentials: HTTPAuthorizationCredentials
+
+):
+
+    try:
+
+        # -----------------------------------------
+        # EXTRACT TOKEN
+        # -----------------------------------------
+
+        token = credentials.credentials
+
+        # -----------------------------------------
+        # DECODE JWT
+        # -----------------------------------------
+
+        payload = jwt.decode(
+
+            token,
+
+            SUPABASE_JWT_SECRET,
+
+            algorithms=["HS256"]
+
+        )
+
+        # -----------------------------------------
+        # EXTRACT USER DATA
+        # -----------------------------------------
+
+        user_id = payload.get("sub")
+
+        email = payload.get("email")
+
+        role = payload.get(
+
+            "role",
+
+            "authenticated"
+
+        )
+
+        # -----------------------------------------
+        # VALIDATE USER
+        # -----------------------------------------
+
+        if not user_id:
+
+            raise HTTPException(
+
+                status_code=401,
+
+                detail="Invalid token"
+
+            )
+
+        # -----------------------------------------
+        # RETURN USER INFO
+        # -----------------------------------------
+
+        return {
+
+            "user_id": user_id,
+
+            "email": email,
+
+            "role": role
+
+        }
+
+    except JWTError:
+
+        raise HTTPException(
+
+            status_code=401,
+
+            detail="Invalid or expired token"
+
+        )
+
+
 
 
 # =========================================================
@@ -189,7 +309,9 @@ async def upload_file(
 @app.get("/api/uploads")
 def list_uploads(
 
-    x_api_key: str = Header(...)
+    credentials: 
+    HTTPAuthorizationCredentials 
+    = Depends(security)
 
 ):
 
@@ -199,16 +321,22 @@ def list_uploads(
 
     try:
 
+        
         # -----------------------------------------
-        # API KEY VALIDATION
+        # VERIFY JWT TOKEN
         # -----------------------------------------
 
-        if x_api_key != API_KEY:
+        user = verify_jwt_token(
+            credentials
+        )
 
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid API Key"
-            )
+        user_id = user["user_id"]
+
+        user_email = user["email"]
+
+
+
+        
 
         # -----------------------------------------
         # DB CONNECTION
@@ -359,23 +487,38 @@ def download_upload_data(
 
         release_conn(conn)
         
-       
+        
+
+
 @app.get("/api/download/all")
 def download_all_uploads(
 
-    x_api_key: str = Header(...)
+    credentials:
+    HTTPAuthorizationCredentials
+    = Depends(security)
 
 ):
 
     # -----------------------------------------------------
-    # API KEY VALIDATION
+    # VERIFY JWT
     # -----------------------------------------------------
 
-    if x_api_key != API_KEY:
+    user = verify_jwt_token(
+        credentials
+    )
+
+    # -----------------------------------------------------
+    # ADMIN CHECK
+    # -----------------------------------------------------
+
+    if user["role"] != "admin":
 
         raise HTTPException(
-            status_code=401,
-            detail="Invalid API Key"
+
+            status_code=403,
+
+            detail="Admin access required"
+
         )
 
     conn = get_conn()
@@ -432,8 +575,9 @@ def download_all_uploads(
 
     finally:
 
-        release_conn(conn)   
-        
+        release_conn(conn)
+
+       
         
 @app.get("/api/uploads/search")
 def search_uploads(
@@ -804,94 +948,24 @@ def ai_taxonomy_search(
 
             SELECT
 
-                sku_id,
+                
+                asn_altiusnxt_stock_number,
 
-                initial_description,
-                additional_description,
+                file_name,
 
-                supplier,
-                supplier_part_number,
 
                 manufacturer_name,
                 manufacturer_part_number,
 
-                brand_name,
-                series,
-                category,
+               
                 taxonomy,
-                end_node,
 
                 manufacturer_name_1,
                 manufacturer_part_number_1,
-                manufacturer_part_number_2,
+                manufacturer_part_number_2
 
-                data_source_status,
 
-                html_1_url,
-                html_2_url,
-
-                specification_sheet_1_url,
-                specification_sheet_1_page,
-
-                catalog_1_url,
-                catalog_1_page,
-
-                brochure_1_url,
-                brochure_1_page,
-
-                msds_sds_url,
-                sell_sheet_url,
-                parts_url,
-                instructions_url,
-                owner_manual_url,
-                drawing_sheet_url,
-                schematic_url,
-                warranty_url,
-
-                video_link,
-                client_url,
-
-                product_image_1_url,
-                client_image_1_url,
-
-                short_description_as_is,
-
-                feature_copy,
-
-                feature_bullets1,
-                feature_bullets2,
-                feature_bullets3,
-                feature_bullets4,
-                feature_bullets5,
-                feature_bullets6,
-                feature_bullets7,
-                feature_bullets8,
-                feature_bullets9,
-                feature_bullets10,
-                feature_bullets11,
-                feature_bullets12,
-                feature_bullets13,
-                feature_bullets14,
-                feature_bullets15,
-                feature_bullets16,
-                feature_bullets17,
-                feature_bullets18,
-                feature_bullets19,
-                feature_bullets20,
-
-                upc,
-                unspsc,
-
-                overall_status,
-
-                product_name,
-
-                fill_rate,
-
-                remarks,
-
-                duplicate_status_yes_no,
-                duplicate_remarks
+                
 
             FROM etl_data
 
@@ -1055,7 +1129,17 @@ def download_ai_taxonomy_search(
 
         query = f"""
 
-            SELECT *
+            SELECT 
+            
+            asn_altiusnxt_stock_number,
+
+            file_name,
+
+            manufacturer_name,
+
+            manufacturer_part_number,
+
+            taxonomy
 
             FROM etl_data
 
@@ -1178,6 +1262,8 @@ def get_project_taxonomy(
 
     project_name: str,
 
+    limit: int = 100,
+
     x_api_key: str = Header(...)
 
 ):
@@ -1209,11 +1295,22 @@ def get_project_taxonomy(
 
         cur.execute("""
 
-            SELECT DISTINCT d.taxonomy
+            SELECT
+
+                d.asn_altiusnxt_stock_number,
+
+                d.file_name,
+
+                d.manufacturer_name,
+
+                d.manufacturer_part_number,
+
+                d.taxonomy
 
             FROM etl_data d
 
             INNER JOIN etl_upload_log l
+
                 ON d.upload_log_id = l.id
 
             WHERE l.project_name = %s
@@ -1224,34 +1321,58 @@ def get_project_taxonomy(
 
             ORDER BY d.taxonomy
 
-        """, (project_name,))
+            LIMIT %s
+
+        """, (
+
+            project_name,
+
+            limit
+
+        ))
 
         rows = cur.fetchall()
 
-        taxonomy_list = [
+        # -----------------------------------------
+        # FORMAT RESPONSE
+        # -----------------------------------------
 
-            row[0]
+        result = []
 
-            for row in rows
+        for row in rows:
 
-            if row[0]
+            result.append({
 
-        ]
+                "asn_altiusnxt_stock_number": row[0],
+
+                "file_name": row[1],
+
+                "manufacturer_name": row[2],
+
+                "manufacturer_part_number": row[3],
+
+                "taxonomy": row[4]
+
+            })
 
         return {
 
             "project_name": project_name,
 
-            "total_taxonomies": len(taxonomy_list),
+            "limit": limit,
 
-            "taxonomy": taxonomy_list
+            "returned_rows": len(result),
+
+            "products": result
 
         }
 
     except Exception as e:
 
         return {
+
             "error": str(e)
+
         }
 
     finally:
@@ -1260,8 +1381,7 @@ def get_project_taxonomy(
             cur.close()
 
         if conn:
-            release_conn(conn)        
-            
+            release_conn(conn)
 @app.get("/api/taxonomy/project/{project_name}/download")
 def download_project_taxonomy(
 
@@ -1294,12 +1414,22 @@ def download_project_taxonomy(
 
         query = """
 
-            SELECT DISTINCT
+            SELECT
+
+                d.asn_altiusnxt_stock_number,
+
+                d.file_name,
+
+                d.manufacturer_name,
+
+                d.manufacturer_part_number,
+
                 d.taxonomy
 
             FROM etl_data d
 
             INNER JOIN etl_upload_log l
+
                 ON d.upload_log_id = l.id
 
             WHERE l.project_name = %s
@@ -1375,7 +1505,7 @@ def download_project_taxonomy(
     finally:
 
         if conn:
-            release_conn(conn)    
+            release_conn(conn)  
             
 @app.get("/api/taxonomy/download/all")
 def download_all_taxonomy(
@@ -1411,7 +1541,16 @@ def download_all_taxonomy(
 
         query = """
 
-            SELECT DISTINCT
+            SELECT
+
+                asn_altiusnxt_stock_number,
+
+                file_name,
+
+                manufacturer_name,
+
+                manufacturer_part_number,
+
                 taxonomy
 
             FROM etl_data
@@ -1491,10 +1630,10 @@ def download_all_taxonomy(
         if conn:
 
             release_conn(conn)   
-            
-                                              
 @app.get("/api/duplicates")
 def get_duplicates(
+
+    project_name: str,
 
     x_api_key: str = Header(...)
 
@@ -1524,46 +1663,86 @@ def get_duplicates(
         # QUERY
         # -----------------------------------------
 
-        
         query = """
 
             SELECT
-                asn_altiusnxt_stock_number,
-                file_name,
-                manufacturer_name,
-                manufacturer_part_number
+
+                e.asn_altiusnxt_stock_number,
+
+                e.file_name,
+
+                e.manufacturer_name,
+
+                e.manufacturer_part_number
+
             FROM etl_data e
+
+            INNER JOIN etl_upload_log l
+
+                ON e.upload_log_id = l.id
+
             WHERE
-                e.manufacturer_name IS NOT NULL
+
+                l.project_name = %s
+
+                AND e.manufacturer_name IS NOT NULL
+
                 AND e.manufacturer_part_number IS NOT NULL
+
                 AND TRIM(e.manufacturer_name) <> ''
+
                 AND TRIM(e.manufacturer_part_number) <> ''
+
                 AND (
+
                     LOWER(TRIM(e.manufacturer_name)),
+
                     LOWER(TRIM(e.manufacturer_part_number))
+
                 ) IN (
+
                     SELECT
-                        LOWER(TRIM(manufacturer_name)),
-                        LOWER(TRIM(manufacturer_part_number))
-                    FROM etl_data
+
+                        LOWER(TRIM(d.manufacturer_name)),
+
+                        LOWER(TRIM(d.manufacturer_part_number))
+
+                    FROM etl_data d
+
+                    INNER JOIN etl_upload_log l2
+
+                        ON d.upload_log_id = l2.id
+
                     WHERE
-                        manufacturer_name IS NOT NULL
-                        AND manufacturer_part_number IS NOT NULL
-                        AND TRIM(manufacturer_name) <> ''
-                        AND TRIM(manufacturer_part_number) <> ''
+
+                        l2.project_name = %s
+
+                        AND d.manufacturer_name IS NOT NULL
+
+                        AND d.manufacturer_part_number IS NOT NULL
+
+                        AND TRIM(d.manufacturer_name) <> ''
+
+                        AND TRIM(d.manufacturer_part_number) <> ''
+
                     GROUP BY
-                        LOWER(TRIM(manufacturer_name)),
-                        LOWER(TRIM(manufacturer_part_number))
+
+                        LOWER(TRIM(d.manufacturer_name)),
+
+                        LOWER(TRIM(d.manufacturer_part_number))
+
                     HAVING COUNT(*) > 1
+
                 )
+
             ORDER BY
-                manufacturer_name,
-                manufacturer_part_number;
+
+                e.manufacturer_name,
+
+                e.manufacturer_part_number
 
         """
 
-
-        
         # -----------------------------------------
         # LOAD DATAFRAME
         # -----------------------------------------
@@ -1572,11 +1751,17 @@ def get_duplicates(
 
             query,
 
-            conn
+            conn,
+
+            params=(
+
+                project_name,
+
+                project_name
+
+            )
 
         )
-
-
 
         # -----------------------------------------
         # EMPTY CHECK
@@ -1586,24 +1771,35 @@ def get_duplicates(
 
             return {
 
-                "message": "No duplicates found"
+                "project_name": project_name,
+
+                "total_duplicate_rows": 0,
+
+                "message": "No duplicates found",
+
+                "rows": []
 
             }
 
-       
+        # -----------------------------------------
+        # RETURN RESPONSE
+        # -----------------------------------------
+
         return {
+
+            "project_name": project_name,
 
             "total_duplicate_rows": len(df),
 
             "columns": list(df.columns),
 
             "rows": df.to_dict(
+
                 orient="records"
+
             )
 
         }
-
-
 
     except Exception as e:
 
@@ -1617,7 +1813,9 @@ def get_duplicates(
 
         if conn:
 
-            release_conn(conn)     
+            release_conn(conn)
+            
+              
             
 @app.get("/api/duplicates/download")
 def download_duplicates(
@@ -1788,4 +1986,4 @@ def download_duplicates(
 
         if conn:
 
-            release_conn(conn)
+            release_conn(conn)                                               
